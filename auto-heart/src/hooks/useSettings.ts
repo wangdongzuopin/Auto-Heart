@@ -1,0 +1,119 @@
+import { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+
+export interface Settings {
+  // 基础
+  intentDocPath: string;
+  watchPaths: string[];
+  silenceMode: 'focus' | 'normal' | 'open';
+  offworkTime: string;
+  // 通知渠道
+  dingtalkWebhook: string;
+  feishuWebhook: string;
+  // 模型选择
+  middleModel: string;
+  middleModelName: string;
+  deepModel: string;
+  deepModelName: string;
+  // API Keys
+  kimiApiKey: string;
+  claudeApiKey: string;
+  gptApiKey: string;
+  qwenApiKey: string;
+  minimaxApiKey: string;
+  deepseekApiKey: string;
+  openrouterApiKey: string;
+  // Ollama
+  ollamaBaseUrl: string;
+}
+
+const DEFAULT_SETTINGS: Settings = {
+  intentDocPath: '',
+  watchPaths: [],
+  silenceMode: 'normal',
+  offworkTime: '18:00',
+  dingtalkWebhook: '',
+  feishuWebhook: '',
+  middleModel: 'kimi',
+  middleModelName: '',
+  deepModel: 'claude',
+  deepModelName: '',
+  kimiApiKey: '',
+  claudeApiKey: '',
+  gptApiKey: '',
+  qwenApiKey: '',
+  minimaxApiKey: '',
+  deepseekApiKey: '',
+  openrouterApiKey: '',
+  ollamaBaseUrl: '',
+};
+
+function fromRust(raw: Record<string, unknown>): Settings {
+  return {
+    intentDocPath: (raw.intent_doc_path as string) ?? '',
+    watchPaths: (raw.watch_paths as string[]) ?? [],
+    silenceMode: ((raw.silence_mode as string) ?? 'normal') as Settings['silenceMode'],
+    offworkTime: (raw.offwork_time as string) ?? '18:00',
+    dingtalkWebhook: (raw.dingtalk_webhook as string) ?? '',
+    feishuWebhook: (raw.feishu_webhook as string) ?? '',
+    middleModel: (raw.middle_model as string) ?? 'kimi',
+    middleModelName: (raw.middle_model_name as string) ?? '',
+    deepModel: (raw.deep_model as string) ?? 'claude',
+    deepModelName: (raw.deep_model_name as string) ?? '',
+    kimiApiKey: (raw.kimi_api_key as string) ?? '',
+    claudeApiKey: (raw.claude_api_key as string) ?? '',
+    gptApiKey: (raw.gpt_api_key as string) ?? '',
+    qwenApiKey: (raw.qwen_api_key as string) ?? '',
+    minimaxApiKey: (raw.minimax_api_key as string) ?? '',
+    deepseekApiKey: (raw.deepseek_api_key as string) ?? '',
+    openrouterApiKey: (raw.openrouter_api_key as string) ?? '',
+    ollamaBaseUrl: (raw.ollama_base_url as string) ?? '',
+  };
+}
+
+function toRust(s: Settings): Record<string, unknown> {
+  return {
+    intent_doc_path: s.intentDocPath,
+    watch_paths: s.watchPaths,
+    silence_mode: s.silenceMode,
+    offwork_time: s.offworkTime,
+    dingtalk_webhook: s.dingtalkWebhook,
+    feishu_webhook: s.feishuWebhook,
+    middle_model: s.middleModel,
+    middle_model_name: s.middleModelName,
+    deep_model: s.deepModel,
+    deep_model_name: s.deepModelName,
+    kimi_api_key: s.kimiApiKey,
+    claude_api_key: s.claudeApiKey,
+    gpt_api_key: s.gptApiKey,
+    qwen_api_key: s.qwenApiKey,
+    minimax_api_key: s.minimaxApiKey,
+    deepseek_api_key: s.deepseekApiKey,
+    openrouter_api_key: s.openrouterApiKey,
+    ollama_base_url: s.ollamaBaseUrl,
+  };
+}
+
+export function useSettings() {
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    invoke<Record<string, unknown>>('load_settings_cmd')
+      .then((raw) => setSettings(fromRust(raw)))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const updateSettings = useCallback(async (patch: Partial<Settings>) => {
+    const updated = { ...settings, ...patch };
+    setSettings(updated);
+    try {
+      await invoke('save_settings', { newSettings: toRust(updated) });
+    } catch (err) {
+      console.error('[useSettings] save failed:', err);
+    }
+  }, [settings]);
+
+  return { settings, updateSettings, loading };
+}

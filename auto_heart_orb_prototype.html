@@ -1,0 +1,274 @@
+
+<style>
+@keyframes breathe {
+  0%,100% { transform: scale(1); opacity: 0.55; }
+  50% { transform: scale(1.22); opacity: 1; }
+}
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.4; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+@keyframes float-bubble {
+  0% { opacity: 0; transform: translateY(6px); }
+  15% { opacity: 1; transform: translateY(0); }
+  85% { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+@keyframes thinking {
+  0%,100% { transform: scale(1) rotate(0deg); opacity: 0.6; }
+  33% { transform: scale(1.1) rotate(5deg); opacity: 1; }
+  66% { transform: scale(0.95) rotate(-4deg); opacity: 0.8; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .orb-idle { animation: breathe 3.2s ease-in-out infinite; }
+  .orb-ring { animation: pulse-ring 3.2s ease-out infinite; }
+  .orb-thinking { animation: thinking 2s ease-in-out infinite; }
+  .bubble { animation: float-bubble 4s ease-in-out forwards; }
+}
+
+.orb-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 24px;
+  background: var(--color-background-secondary);
+  border-radius: var(--border-radius-lg);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.orb-wrap:hover { background: var(--color-background-tertiary); }
+.orb-container {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ring {
+  position: absolute;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 1.5px solid #AFA9EC;
+}
+.orb-core {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #EEEDFE;
+  border: 0.5px solid #AFA9EC;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.orb-inner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #534AB7;
+}
+.state-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+.state-desc {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.bubble-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+.speech-bubble {
+  background: var(--color-background-primary);
+  border: 0.5px solid #AFA9EC;
+  border-radius: 12px 12px 0 12px;
+  padding: 10px 14px;
+  max-width: 220px;
+}
+.speech-title {
+  font-size: 11px;
+  color: #534AB7;
+  margin-bottom: 4px;
+}
+.speech-text {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.speech-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+</style>
+
+<div style="font-family:var(--font-sans);">
+
+  <!-- Three states row -->
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
+
+    <!-- State 1: Idle / breathing -->
+    <div class="orb-wrap" onclick="sendPrompt('Auto-Heart 沉默状态的设计细节')">
+      <div class="orb-container">
+        <div class="ring orb-ring"></div>
+        <div class="orb-core orb-idle">
+          <div class="orb-inner"></div>
+        </div>
+      </div>
+      <div class="state-label">沉默</div>
+      <div class="state-desc">轻轻呼吸<br/>几乎感知不到</div>
+    </div>
+
+    <!-- State 2: Thinking -->
+    <div class="orb-wrap" onclick="sendPrompt('Auto-Heart 思考状态的触发机制')">
+      <div class="orb-container">
+        <div class="orb-core orb-thinking" style="width:40px;height:40px;border-width:1px;border-color:#534AB7;">
+          <div class="orb-inner" style="width:16px;height:16px;"></div>
+        </div>
+      </div>
+      <div class="state-label">思考中</div>
+      <div class="state-desc">心跳触发<br/>正在推理判断</div>
+    </div>
+
+    <!-- State 3: Speaking -->
+    <div class="orb-wrap" onclick="sendPrompt('Auto-Heart 发言状态的交互细节')">
+      <div class="bubble-wrap">
+        <div class="speech-bubble bubble">
+          <div class="speech-title">注意到一个问题</div>
+          <div class="speech-text">verify() 缺少过期校验，存在安全风险。</div>
+          <div class="speech-actions">
+            <button style="font-size:11px;padding:3px 8px;border-radius:5px;cursor:pointer;background:#EEEDFE;border:0.5px solid #AFA9EC;color:#534AB7;">帮我改</button>
+            <button style="font-size:11px;padding:3px 8px;border-radius:5px;cursor:pointer;">忽略</button>
+          </div>
+        </div>
+        <div class="orb-core" style="width:32px;height:32px;border-color:#534AB7;border-width:1px;">
+          <div class="orb-inner" style="width:12px;height:12px;"></div>
+        </div>
+      </div>
+      <div class="state-label">有话说</div>
+      <div class="state-desc">气泡浮现<br/>说完自动收回</div>
+    </div>
+
+  </div>
+
+  <!-- Main window mockup -->
+  <div style="background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);overflow:hidden;">
+
+    <!-- Window titlebar -->
+    <div style="background:var(--color-background-secondary);padding:10px 16px;border-bottom:0.5px solid var(--color-border-tertiary);display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;gap:5px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:var(--color-border-secondary);"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:var(--color-border-secondary);"></div>
+        <div style="width:10px;height:10px;border-radius:50%;background:var(--color-border-secondary);"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-left:8px;">
+        <div class="orb-core orb-idle" style="width:20px;height:20px;">
+          <div class="orb-inner" style="width:8px;height:8px;"></div>
+        </div>
+        <span style="font-size:13px;font-weight:500;color:var(--color-text-primary);">Auto-Heart</span>
+      </div>
+      <span style="margin-left:auto;font-size:11px;color:var(--color-text-success);display:flex;align-items:center;gap:4px;">
+        <span style="width:5px;height:5px;border-radius:50%;background:currentColor;display:inline-block;"></span>活跃
+      </span>
+    </div>
+
+    <!-- Tabs -->
+    <div style="display:flex;border-bottom:0.5px solid var(--color-border-tertiary);">
+      <div style="padding:8px 16px;font-size:12px;color:#534AB7;border-bottom:2px solid #534AB7;cursor:pointer;">今天</div>
+      <div style="padding:8px 16px;font-size:12px;color:var(--color-text-tertiary);cursor:pointer;">语义地图</div>
+      <div style="padding:8px 16px;font-size:12px;color:var(--color-text-tertiary);cursor:pointer;">设置</div>
+    </div>
+
+    <!-- Today panel -->
+    <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+
+      <!-- Intent input -->
+      <div>
+        <div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:6px;">今日意图</div>
+        <div style="background:var(--color-background-tertiary);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--color-text-secondary);line-height:1.8;">
+          完成 refreshToken 过期校验 → 10:00<br/>
+          联调 dashboard 接口 → 下午<br/>
+          3点技术评审，准备 auth 说明<br/>
+          <span style="color:var(--color-text-tertiary);">下班前写日报</span>
+        </div>
+      </div>
+
+      <!-- Today tasks parsed -->
+      <div>
+        <div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:6px;">已解析为</div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--color-background-secondary);border-radius:7px;">
+            <span style="font-size:11px;font-weight:500;color:#534AB7;min-width:36px;">10:00</span>
+            <span style="font-size:12px;color:var(--color-text-primary);flex:1;">refreshToken 过期校验</span>
+            <span style="font-size:10px;color:var(--color-text-tertiary);">auth/guard.ts</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--color-background-secondary);border-radius:7px;">
+            <span style="font-size:11px;font-weight:500;color:#534AB7;min-width:36px;">13:00</span>
+            <span style="font-size:12px;color:var(--color-text-primary);flex:1;">dashboard 接口联调</span>
+            <span style="font-size:10px;color:var(--color-text-tertiary);">UserService</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:#EEEDFE;border-radius:7px;border:0.5px solid #AFA9EC;">
+            <span style="font-size:11px;font-weight:500;color:#534AB7;min-width:36px;">14:30</span>
+            <span style="font-size:12px;color:#3C3489;flex:1;">技术评审 — 我来帮你整理</span>
+            <span style="font-size:10px;color:#7F77DD;">进行中</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--color-background-secondary);border-radius:7px;">
+            <span style="font-size:11px;font-weight:500;color:#534AB7;min-width:36px;">18:00</span>
+            <span style="font-size:12px;color:var(--color-text-primary);flex:1;">日报</span>
+            <span style="font-size:10px;color:var(--color-text-tertiary);">我来写</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Message queue -->
+      <div>
+        <div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:6px;">等待发送的消息</div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--color-background-warning);border-radius:7px;">
+            <div style="width:5px;height:5px;border-radius:50%;background:var(--color-text-warning);flex-shrink:0;"></div>
+            <span style="font-size:12px;color:var(--color-text-warning);flex:1;">Guard 缺少 tenantId — flow 结束后提醒</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;padding:7px 10px;background:var(--color-background-secondary);border-radius:7px;">
+            <div style="width:5px;height:5px;border-radius:50%;background:var(--color-border-secondary);flex-shrink:0;"></div>
+            <span style="font-size:12px;color:var(--color-text-tertiary);flex:1;">UserService 可进一步优化 — 日报时附带</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Model config row -->
+  <div style="margin-top:12px;background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-lg);padding:14px 16px;">
+    <div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:8px;">模型配置</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+      <div style="background:var(--color-background-secondary);border-radius:7px;padding:8px 10px;">
+        <div style="font-size:10px;color:var(--color-text-tertiary);margin-bottom:3px;">浅层心跳</div>
+        <div style="font-size:12px;color:var(--color-text-secondary);">本地规则引擎</div>
+        <div style="font-size:10px;color:var(--color-text-success);margin-top:2px;">0 token</div>
+      </div>
+      <div style="background:var(--color-background-secondary);border-radius:7px;padding:8px 10px;">
+        <div style="font-size:10px;color:var(--color-text-tertiary);margin-bottom:3px;">中层心跳</div>
+        <div style="font-size:12px;color:var(--color-text-secondary);">Kimi · 用户 Key</div>
+        <div style="font-size:10px;color:#534AB7;margin-top:2px;">低消耗</div>
+      </div>
+      <div style="background:#EEEDFE;border-radius:7px;padding:8px 10px;border:0.5px solid #AFA9EC;">
+        <div style="font-size:10px;color:#7F77DD;margin-bottom:3px;">深层心跳</div>
+        <div style="font-size:12px;color:#3C3489;">Claude · 用户 Key</div>
+        <div style="font-size:10px;color:#534AB7;margin-top:2px;">每日几次</div>
+      </div>
+    </div>
+  </div>
+
+</div>

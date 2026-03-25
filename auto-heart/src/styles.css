@@ -1,112 +1,129 @@
-.logo.vanilla:hover {
-  filter: drop-shadow(0 0 2em #ffe21c);
-}
+/* ============================================
+   Auto-Heart 设计系统 · Design Tokens
+   ============================================ */
+
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
+  /* --- 字体 --- */
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+
+  /* --- 色彩 · 深色主题 --- */
+  --color-background-primary: #0a0a14;
+  --color-background-secondary: #12121e;
+  --color-background-tertiary: #1a1a2e;
+  --color-background-warning: rgba(255, 176, 32, 0.1);
+
+  /* 品牌色 */
+  --color-brand: #534AB7;
+  --color-brand-light: #EEEDFE;
+  --color-brand-ring: #AFA9EC;
+  --color-brand-dark: #3C3489;
+  --color-brand-muted: #7F77DD;
+
+  /* 文字 */
+  --color-text-primary: #eeeeee;
+  --color-text-secondary: #999999;
+  --color-text-tertiary: #666666;
+  --color-text-success: #4CAF50;
+  --color-text-warning: #FFB020;
+
+  /* 边框 */
+  --color-border-primary: #333333;
+  --color-border-secondary: #444444;
+  --color-border-tertiary: #222222;
+
+  /* 圆角 */
+  --border-radius-sm: 5px;
+  --border-radius-md: 7px;
+  --border-radius-lg: 12px;
+  --border-radius-xl: 16px;
+
+  /* --- 基础重置 --- */
+  font-family: var(--font-sans);
+  line-height: 1.5;
   font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
+  color-scheme: dark;
+  color: var(--color-text-primary);
+  background-color: var(--color-background-primary);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
 }
 
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
+/* ============================================
+   Orb 动画关键帧（匹配 prototype 规范）
+   ============================================ */
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+@keyframes breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.55;
   }
-
-  a:hover {
-    color: #24c8db;
+  50% {
+    transform: scale(1.22);
+    opacity: 1;
   }
+}
 
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+@keyframes pulse-ring {
+  0% {
+    transform: scale(1);
+    opacity: 0.4;
   }
-  button:active {
-    background-color: #0f0f0f69;
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+@keyframes thinking {
+  0%, 100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0.6;
+  }
+  33% {
+    transform: scale(1.1) rotate(5deg);
+    opacity: 1;
+  }
+  66% {
+    transform: scale(0.95) rotate(-4deg);
+    opacity: 0.8;
+  }
+}
+
+@keyframes float-bubble {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  85% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(175, 169, 236, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(175, 169, 236, 0.6);
+  }
+}
+
+/* 尊重用户减少动画偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

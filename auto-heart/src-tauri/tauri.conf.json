@@ -1,33 +1,67 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "auto-heart",
+  "productName": "Auto-Heart",
   "version": "0.1.0",
-  "identifier": "com.jelly.auto-heart",
+  "identifier": "com.auto-heart.app",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
   },
   "app": {
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "auto-heart",
-        "width": 800,
-        "height": 600
+        "label": "orb",
+        "title": "Auto-Heart",
+        "width": 160,
+        "height": 160,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "visible": true,
+        "shadow": false,
+        "url": "index.html#orb"
       }
     ],
     "security": {
       "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": false
     }
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis", "msi"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
-      "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Auto-Heart · 你的编程心跳伴侣",
+    "longDescription": "Auto-Heart 是一个常驻桌面的 AI 编程助手，通过三层心跳机制感知你的工作状态，在合适的时机提供帮助、生成日报，做到真正的「润物细无声」。",
+    "copyright": "Copyright © 2026 Auto-Heart",
+    "category": "DeveloperTool",
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "tsp": false,
+      "wix": {
+        "language": "zh-CN"
+      },
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/128x128.png",
+        "sidebarImage": "icons/128x128@2x.png"
+      }
+    }
   }
 }
