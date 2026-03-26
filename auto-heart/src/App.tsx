@@ -20,7 +20,7 @@ interface IncomingMessage {
   priority: number;
 }
 
-type BubbleType = 'message' | 'report';
+type BubbleType = 'message' | 'report' | 'agent';
 
 function App() {
   const [orbState, setOrbState] = useState<'idle' | 'thinking' | 'speaking'>('idle');
@@ -92,12 +92,12 @@ function App() {
   };
 
   const handleBubbleAction = async () => {
-    if (bubbleMessage) {
-      if (bubbleMessage.type === 'report') {
-        try { await invoke('open_main_window'); } catch {}
-      } else {
-        try { await invoke('ack_message', { id: bubbleMessage.id }); } catch {}
-      }
+    if (bubbleMessage?.type === 'agent') {
+      try { await invoke('open_main_window'); } catch {}
+    } else if (bubbleMessage?.type === 'report') {
+      try { await invoke('open_main_window'); } catch {}
+    } else {
+      try { await invoke('ack_message', { id: bubbleMessage?.id }); } catch {}
     }
     setBubbleMessage(null);
     setOrbState('idle');
@@ -134,6 +134,7 @@ function App() {
     let unlistenNew: (() => void) | undefined;
     let unlistenMiddle: (() => void) | undefined;
     let unlistenDeep: (() => void) | undefined;
+    let unlistenAgent: (() => void) | undefined;
     let thinkingTimer: ReturnType<typeof setTimeout> | undefined;
 
     const setup = async () => {
@@ -162,6 +163,21 @@ function App() {
           type: 'report',
         });
       });
+
+      // 主动建议气泡
+      unlistenAgent = await listen<{
+        type: 'critical' | 'intent_reminder' | 'queue_warning';
+        title: string;
+        message: string;
+      }>('agent:alert', (event) => {
+        setBubbleMessage({
+          id: `agent-${Date.now()}`,
+          title: event.payload.title,
+          content: event.payload.message,
+          type: 'agent',
+        });
+        setOrbState('speaking');
+      });
     };
 
     setup();
@@ -171,6 +187,7 @@ function App() {
       unlistenNew?.();
       unlistenMiddle?.();
       unlistenDeep?.();
+      unlistenAgent?.();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orbState]);
@@ -196,8 +213,8 @@ function App() {
             message={{ title: bubbleMessage.title, content: bubbleMessage.content }}
             onDismiss={handleBubbleDismiss}
             onAction={handleBubbleAction}
-            actionLabel={bubbleMessage.type === 'report' ? '查看日报' : '帮我改'}
-            dismissLabel={bubbleMessage.type === 'report' ? '稍后' : '忽略'}
+            actionLabel={bubbleMessage.type === 'report' ? '查看日报' : bubbleMessage.type === 'agent' ? '查看' : '帮我改'}
+            dismissLabel={bubbleMessage.type === 'report' ? '稍后' : bubbleMessage.type === 'agent' ? '忽略' : '忽略'}
           />
         )}
       </div>
