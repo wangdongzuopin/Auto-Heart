@@ -1,4 +1,5 @@
 mod commands;
+mod conversation;
 mod database;
 mod heartbeat;
 mod model_router;
