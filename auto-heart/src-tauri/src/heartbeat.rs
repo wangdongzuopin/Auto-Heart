@@ -939,6 +939,101 @@ fn save_operation_logs(db: &DbPool, analysis: &IntentionAnalysis, chunk_id: &str
 }
 
 // ──────────────────────────────────────────────
+// 主动建议引擎
+// ──────────────────────────────────────────────
+
+/// 发送主动建议气泡
+fn emit_agent_alert(app: &AppHandle, alert_type: &str, title: &str, message: &str) {
+    eprintln!("[agent] alert: {} - {}", alert_type, title);
+    let _ = app.emit(
+        "agent:alert",
+        serde_json::json!({
+            "type": alert_type,
+            "title": title,
+            "message": message,
+        }),
+    );
+}
+
+/// 检测关键模块变更
+fn detect_critical_changes(
+    changes: &[FileChangeRecord],
+    keywords: &[String],
+) -> Vec<FileChangeRecord> {
+    changes
+        .iter()
+        .filter(|c| {
+            let path_lower = c.path.to_lowercase();
+            keywords.iter().any(|kw| path_lower.contains(&kw.to_lowercase()))
+        })
+        .cloned()
+        .collect()
+}
+
+/// 获取关键模块关键词列表
+fn get_critical_keywords(settings: &crate::settings::AppSettings) -> Vec<String> {
+    settings
+        .critical_keywords
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 检查并触发主动建议
+fn check_proactive_suggestions(
+    app: &AppHandle,
+    db: &DbPool,
+    settings: &crate::settings::AppSettings,
+    recent_changes: &[FileChangeRecord],
+) {
+    if !settings.proactive_suggestions {
+        return;
+    }
+
+    // 1. 关键模块变更检测
+    let keywords = get_critical_keywords(settings);
+    let critical = detect_critical_changes(recent_changes, &keywords);
+    if !critical.is_empty() {
+        let files: Vec<&str> = critical.iter().map(|c| c.path.as_str()).collect();
+        emit_agent_alert(
+            app,
+            "critical",
+            "关键模块变更",
+            &format!("检测到关键文件变更：{}", files.join(", ")),
+        );
+        return;
+    }
+
+    // 2. intent 文档今日是否更新
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let intent_updated: bool = {
+        let db = match db.lock() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let count: i32 = db
+            .query_row(
+                "SELECT COUNT(*) FROM intent_history \
+                 WHERE date(created_at) = ?1 AND parsed_tasks != '[]'",
+                rusqlite::params![today],
+                |row| row.get::<_, i32>(0),
+            )
+            .unwrap_or(0);
+        count > 0
+    };
+
+    if !intent_updated && !settings.intent_doc_path.is_empty() {
+        emit_agent_alert(
+            app,
+            "intent_reminder",
+            "今日意图待更新",
+            "你今天还没有更新意图文档，要看一下吗？",
+        );
+    }
+}
+
+// ──────────────────────────────────────────────
 // 操作日志心跳 — 每 5 分钟（意图分析）
 // ──────────────────────────────────────────────
 
@@ -963,6 +1058,8 @@ pub fn start_operation_log_heartbeat(
                 eprintln!("[operation_log] 分析了 {} 项变更", analysis.intentions.len());
                 save_operation_logs(&db, &analysis, &chunk_id);
             }
+            // 主动建议检查
+            check_proactive_suggestions(&app, &db, &settings_snap, &changes);
         }
     });
 }
