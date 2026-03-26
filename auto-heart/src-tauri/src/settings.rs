@@ -12,7 +12,6 @@ pub struct AppSettings {
     /// 自定义数据根目录（空 = 使用默认 app_data_dir）
     /// 实际数据路径：{data_dir}/YYYY-MM-DD/
     pub data_dir: String,
-    pub intent_doc_path: String,
     pub watch_paths: Vec<String>,
     pub silence_mode: String,
     pub offwork_time: String,
@@ -28,6 +27,8 @@ pub struct AppSettings {
     pub deep_model: String,
     /// 深层心跳具体模型名
     pub deep_model_name: String,
+    pub chat_model: String,
+    pub chat_model_name: String,
 
     // ── API Keys ──
     pub kimi_api_key: String,
@@ -52,7 +53,6 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             data_dir: String::new(),
-            intent_doc_path: String::new(),
             watch_paths: vec![],
             silence_mode: "normal".to_string(),
             offwork_time: "18:00".to_string(),
@@ -62,6 +62,8 @@ impl Default for AppSettings {
             middle_model_name: String::new(),
             deep_model: "claude".to_string(),
             deep_model_name: String::new(),
+            chat_model: "kimi".to_string(),
+            chat_model_name: String::new(),
             kimi_api_key: String::new(),
             claude_api_key: String::new(),
             gpt_api_key: String::new(),
