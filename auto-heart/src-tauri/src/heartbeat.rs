@@ -12,6 +12,32 @@ use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
 // ──────────────────────────────────────────────
+// 操作日志 — 意图分析数据结构
+// ──────────────────────────────────────────────
+
+/// LLM 意图分析响应
+#[derive(Deserialize)]
+struct IntentionAnalysis {
+    intentions: Vec<IntentionItem>,
+}
+
+#[derive(Deserialize)]
+struct IntentionItem {
+    file: String,
+    change_type: String,
+    description: String,
+    confidence: f32,
+    tags: Vec<String>,
+}
+
+/// 文件变更记录（用于批量分析）
+#[derive(Clone)]
+struct FileChangeRecord {
+    path: String,
+    change_type: String,
+}
+
+// ──────────────────────────────────────────────
 // 浅层心跳 — 每 30 秒（本地规则，0 token）
 // ──────────────────────────────────────────────
 
@@ -802,6 +828,114 @@ fn is_inactive_for_minutes(db: &DbPool, minutes: i64) -> bool {
         )
         .unwrap_or(1);
     count == 0
+}
+
+// ──────────────────────────────────────────────
+// 操作日志 — 意图分析
+// ──────────────────────────────────────────────
+
+/// 收集近 N 分钟的文件变更
+fn collect_recent_file_changes(db: &DbPool, minutes_back: i64) -> Vec<FileChangeRecord> {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+    let param = format!("-{} minutes", minutes_back);
+    let mut stmt = match db.prepare(
+        "SELECT file_path, change_type FROM file_changes \
+         WHERE timestamp > datetime('now', ?1) LIMIT 50",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    stmt.query_map(rusqlite::params![param], |row| {
+        Ok(FileChangeRecord {
+            path: row.get(0)?,
+            change_type: row.get(1)?,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// 调用 LLM 分析文件变更意图
+fn call_intention_analysis(
+    settings: &crate::settings::AppSettings,
+    changes: &[FileChangeRecord],
+) -> Option<IntentionAnalysis> {
+    if changes.is_empty() {
+        return None;
+    }
+
+    let changes_text = changes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("{}. {} [{}]", i + 1, c.path, c.change_type))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "以下是你监测到的文件变更（每5分钟收集一次）：\n{}\n\n\
+        请分析这些变更的意图，输出 JSON（无其他内容）：\n\
+        {{\"intentions\": [{{\"file\":\"路径\",\"change_type\":\"类型\",\"description\":\"意图描述（中文，简洁，20字内）\",\"confidence\":0.8,\"tags\":[\"标签\"]}}]}}\n\n\
+        标签从以下选择：feature, bugfix, refactor, docs, chore, security, performance\n\
+        confidence 0.0~1.0，过低（<0.5）的分析结果不写入\n\
+        只输出 JSON，不要 markdown 代码块。",
+        changes_text
+    );
+
+    let config = match crate::model_router::build_model_config(
+        &settings.middle_model,
+        &settings.middle_model_name,
+        settings,
+    ) {
+        Some(c) => c,
+        None => return None,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let router = ModelRouter::new();
+    let response = rt.block_on(router.call_with_config(
+        &config,
+        &prompt,
+        Some("你是 Auto-Heart 的意图分析助手，只输出 JSON。"),
+    )).ok()?;
+
+    let json_str = extract_json(&response);
+    serde_json::from_str(json_str).ok()
+}
+
+/// 保存意图分析结果到 operation_log 表
+fn save_operation_logs(db: &DbPool, analysis: &IntentionAnalysis, chunk_id: &str) {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    for item in &analysis.intentions {
+        if item.confidence < 0.5 {
+            continue;
+        }
+        let id = Uuid::new_v4().to_string();
+        let tags_json = serde_json::to_string(&item.tags).unwrap_or_default();
+        let _ = db.execute(
+            "INSERT INTO operation_log \
+             (id, file_path, change_type, intention_desc, confidence, tags, chunk_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                id,
+                item.file,
+                item.change_type,
+                item.description,
+                item.confidence,
+                tags_json,
+                chunk_id
+            ],
+        );
+    }
 }
 
 // ──────────────────────────────────────────────
