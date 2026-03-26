@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     // ── 基础配置 ──
+    /// 自定义数据根目录（空 = 使用默认 app_data_dir）
+    /// 实际数据路径：{data_dir}/YYYY-MM-DD/
+    pub data_dir: String,
     pub intent_doc_path: String,
     pub watch_paths: Vec<String>,
     pub silence_mode: String,
@@ -44,6 +47,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            data_dir: String::new(),
             intent_doc_path: String::new(),
             watch_paths: vec![],
             silence_mode: "normal".to_string(),

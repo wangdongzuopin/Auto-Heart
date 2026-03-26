@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { useSettings, Settings } from '../hooks/useSettings';
 
 // ──────────────────────────────────────────────
@@ -416,6 +417,39 @@ export default function SettingsTab() {
       {/* ── 系统 ── */}
       <div>
         <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>系统</div>
+
+        {/* 数据目录 */}
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>数据目录</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              type="text"
+              placeholder="留空使用默认目录"
+              value={settings.dataDir}
+              onChange={(e) => updateSettings({ dataDir: e.target.value })}
+              onBlur={(e) => { handleSave({ dataDir: e.target.value }); (e.target as HTMLInputElement).style.borderColor = '#333'; }}
+              style={{ ...inputStyle, flex: 1 }}
+              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#534AB7'; }}
+            />
+            <button
+              onClick={async () => {
+                try {
+                  const selected = await open({ directory: true, multiple: false });
+                  if (selected) {
+                    handleSave({ dataDir: selected as string });
+                  }
+                } catch (e) {
+                  console.error('[Settings] browse data dir:', e);
+                }
+              }}
+              style={{ padding: '8px 12px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-primary)', color: 'var(--color-text-secondary)' }}
+            >浏览</button>
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
+            设为空则使用默认目录 · 每日数据存放在 {settings.dataDir ? settings.dataDir + '/YYYY-MM-DD/' : '%APPDATA%'} 下
+          </div>
+        </div>
+
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)' }}>
           <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-primary)', marginBottom: 2 }}>开机自动启动</div>

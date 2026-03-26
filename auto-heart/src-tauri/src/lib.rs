@@ -13,6 +13,7 @@ use settings::{load_settings, SettingsHandle};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use chrono::Local;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -99,24 +100,35 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // ── 系统托盘 ──
             setup_tray(app.handle())?;
 
             // ── 数据目录 ──
+            // settings.json 始终存在默认目录（锚点）
             let app_data_dir: PathBuf = app.path().app_data_dir().expect("无法获取 app_data_dir");
             std::fs::create_dir_all(&app_data_dir).ok();
 
+            // 读取 data_dir 设置，决定实际数据存放位置
+            let app_settings = load_settings(&app_data_dir);
+            let today_str = Local::now().format("%Y-%m-%d").to_string();
+            let today_dir: PathBuf = if app_settings.data_dir.is_empty() {
+                app_data_dir.clone()
+            } else {
+                PathBuf::from(&app_settings.data_dir).join(&today_str)
+            };
+            std::fs::create_dir_all(&today_dir).ok();
+
             // ── 数据库 ──
-            let db = init_database(app_data_dir.clone()).expect("数据库初始化失败");
+            let db = init_database(today_dir).expect("数据库初始化失败");
             app.manage(db.clone());
 
             // ── 设置 ──
-            let app_settings = load_settings(&app_data_dir);
             let watch_paths: Vec<PathBuf> =
                 app_settings.watch_paths.iter().map(PathBuf::from).collect();
             let intent_doc_path = app_settings.intent_doc_path.clone();
-            let settings_handle: SettingsHandle = Arc::new(Mutex::new(app_settings));
+            let settings_handle: SettingsHandle = Arc::new(Mutex::new(app_settings.clone()));
             app.manage(settings_handle.clone());
 
             // ── 启动三层心跳 ──

@@ -11,6 +11,7 @@ async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>)
 
 export interface Settings {
   // 基础
+  dataDir: string;          // 自定义数据目录，空=默认
   intentDocPath: string;
   watchPaths: string[];
   silenceMode: 'focus' | 'normal' | 'open';
@@ -36,6 +37,7 @@ export interface Settings {
 }
 
 const DEFAULT_SETTINGS: Settings = {
+  dataDir: '',
   intentDocPath: '',
   watchPaths: [],
   silenceMode: 'normal',
@@ -58,6 +60,7 @@ const DEFAULT_SETTINGS: Settings = {
 
 function fromRust(raw: Record<string, unknown>): Settings {
   return {
+    dataDir: (raw.data_dir as string) ?? '',
     intentDocPath: (raw.intent_doc_path as string) ?? '',
     watchPaths: (raw.watch_paths as string[]) ?? [],
     silenceMode: ((raw.silence_mode as string) ?? 'normal') as Settings['silenceMode'],
@@ -81,6 +84,7 @@ function fromRust(raw: Record<string, unknown>): Settings {
 
 function toRust(s: Settings): Record<string, unknown> {
   return {
+    data_dir: s.dataDir,
     intent_doc_path: s.intentDocPath,
     watch_paths: s.watchPaths,
     silence_mode: s.silenceMode,
