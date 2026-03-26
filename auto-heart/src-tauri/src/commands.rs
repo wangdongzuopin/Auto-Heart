@@ -1,5 +1,5 @@
 use crate::database::DbPool;
-use crate::settings::{AppSettings, SettingsHandle};
+use crate::settings::{AppSettings, SettingsHandle, WindowState};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
@@ -529,4 +529,54 @@ pub fn get_trend_stats(days: i64, db: State<'_, DbPool>) -> TrendStats {
         avg_per_day: avg,
         top_modules: top,
     }
+}
+
+// ──────────────────────────────────────────────
+// 窗口状态命令
+// ──────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct MainWindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_maximized: bool,
+}
+
+impl From<MainWindowState> for WindowState {
+    fn from(s: MainWindowState) -> Self {
+        WindowState {
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+            is_maximized: s.is_maximized,
+        }
+    }
+}
+
+impl From<WindowState> for MainWindowState {
+    fn from(s: WindowState) -> Self {
+        MainWindowState {
+            x: s.x,
+            y: s.y,
+            width: s.width,
+            height: s.height,
+            is_maximized: s.is_maximized,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn save_window_state(state: MainWindowState, settings: State<'_, SettingsHandle>) -> Result<(), String> {
+    let mut s = settings.lock().unwrap();
+    s.last_window_state = Some(state.into());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn load_window_state(settings: State<'_, SettingsHandle>) -> Option<MainWindowState> {
+    let s = settings.lock().unwrap();
+    s.last_window_state.clone().map(|ws| ws.into())
 }

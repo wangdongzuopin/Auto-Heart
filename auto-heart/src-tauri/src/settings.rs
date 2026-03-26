@@ -47,6 +47,19 @@ pub struct AppSettings {
     // ── 主动建议 ──
     pub proactive_suggestions: bool,
     pub critical_keywords: String,
+
+    // ── 窗口状态 ──
+    pub last_window_state: Option<WindowState>,
+}
+
+/// 窗口状态结构体（用于窗口位置/大小记忆）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub is_maximized: bool,
 }
 
 impl Default for AppSettings {
@@ -74,6 +87,7 @@ impl Default for AppSettings {
             ollama_base_url: String::new(),
             proactive_suggestions: true,
             critical_keywords: "auth,security,password,token,payment,config,middleware,permission".to_string(),
+            last_window_state: None,
         }
     }
 }

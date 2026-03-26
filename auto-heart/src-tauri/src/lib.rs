@@ -197,6 +197,9 @@ pub fn run() {
             commands::query_operation_logs,
             commands::search_file_changes,
             commands::get_trend_stats,
+            // 窗口状态
+            commands::save_window_state,
+            commands::load_window_state,
         ])
         .run(tauri::generate_context!())
         .expect("Auto-Heart 运行失败");
