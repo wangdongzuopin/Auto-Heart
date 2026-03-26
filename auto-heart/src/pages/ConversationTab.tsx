@@ -7,6 +7,14 @@ interface ChatMessage {
   timestamp: string;
 }
 
+interface ConversationInfo {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
 interface OperationLogEntry {
   id: string;
   timestamp: string;
@@ -16,6 +24,8 @@ interface OperationLogEntry {
 }
 
 export default function ConversationTab() {
+  const [conversations, setConversations] = useState<ConversationInfo[]>([]);
+  const [currentConvId, setCurrentConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -29,13 +39,87 @@ export default function ConversationTab() {
     scrollToBottom();
   }, [messages]);
 
+  // 加载会话列表
+  useEffect(() => {
+    loadConversations();
+  }, []);
+
+  // 加载当前会话的消息
+  useEffect(() => {
+    if (currentConvId) {
+      loadConversation(currentConvId);
+    } else {
+      setMessages([]);
+    }
+  }, [currentConvId]);
+
+  const loadConversations = async () => {
+    try {
+      const list = await invoke<ConversationInfo[]>('get_conversations');
+      setConversations(list);
+    } catch (e) {
+      console.error('[ConversationTab] load conversations:', e);
+    }
+  };
+
+  const loadConversation = async (id: string) => {
+    try {
+      const conv = await invoke<{ messages: ChatMessage[] } | null>('get_conversation', { id });
+      if (conv) {
+        setMessages(conv.messages);
+      }
+    } catch (e) {
+      console.error('[ConversationTab] load conversation:', e);
+    }
+  };
+
+  const handleNewConversation = async () => {
+    if (!input.trim()) return;
+    try {
+      const conv = await invoke<ConversationInfo>('create_conversation', { firstMessage: input.trim() });
+      setCurrentConvId(conv.id);
+      setMessages([{
+        role: 'user',
+        content: input.trim(),
+        timestamp: new Date().toISOString(),
+      }]);
+      setInput('');
+      await loadConversations();
+    } catch (e) {
+      console.error('[ConversationTab] create conversation:', e);
+    }
+  };
+
+  const handleDeleteConversation = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await invoke('delete_conversation', { id });
+      if (currentConvId === id) {
+        setCurrentConvId(null);
+        setMessages([]);
+      }
+      await loadConversations();
+    } catch (e) {
+      console.error('[ConversationTab] delete:', e);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || loading) return;
 
+    const userContent = input.trim();
+
+    // 如果没有当前会话，先创建
+    if (!currentConvId) {
+      await handleNewConversationAndSend(userContent);
+      return;
+    }
+
+    // 添加用户消息
     const userMsg: ChatMessage = {
       role: 'user',
-      content: input.trim(),
+      content: userContent,
       timestamp: new Date().toISOString(),
     };
     setMessages(prev => [...prev, userMsg]);
@@ -43,63 +127,118 @@ export default function ConversationTab() {
     setLoading(true);
 
     try {
-      const lower = userMsg.content.toLowerCase();
-      let response: string;
-
-      if (lower.includes('今天') && (lower.includes('做了') || lower.includes('做了什么'))) {
-        const logs = await invoke<OperationLogEntry[]>('query_operation_logs', { date: 'today' });
-        if (logs.length === 0) {
-          response = '今天暂无记录的操作。可能还没有文件变更，或变更还未被分析。';
-        } else {
-          const summary = logs.slice(0, 10).map(l =>
-            `- ${l.intention_desc} (${l.file_path})`
-          ).join('\n');
-          response = `今天共记录了 ${logs.length} 项操作：\n${summary}`;
-        }
-      } else if (lower.includes('找') && lower.includes('文件')) {
-        const keyword = lower.replace(/.*找一下|文件/g, '').trim() || '%';
-        const files = await invoke<[string, string, string][]>('search_file_changes', {
-          keyword,
-          daysBack: 7,
-        });
-        if (files.length === 0) {
-          response = `最近7天没有找到包含"${keyword}"的文件变更。`;
-        } else {
-          const list = files.slice(0, 10).map(([path, type, time]) =>
-            `- ${path} [${type}] @ ${time}`
-          ).join('\n');
-          response = `最近7天找到 ${files.length} 个相关文件：\n${list}`;
-        }
-      } else if (lower.includes('周') && (lower.includes('平均') || lower.includes('多少'))) {
-        const stats = await invoke<{ avg_per_day: number; total_changes: number; top_modules: string[] }>('get_trend_stats', { days: 7 });
-        response = `最近7天统计：\n- 总变更：${stats.total_changes} 次\n- 日均：${stats.avg_per_day.toFixed(1)} 次\n- 高频模块：${stats.top_modules.join(', ') || '无'}。`;
-      } else {
-        response = '我目前支持：\n- "今天我做了什么？" - 查询今日操作日志\n- "找一下 XX 文件" - 搜索文件变更\n- "这周平均多少" - 趋势统计\n\n请告诉我你想查询什么？';
-      }
-
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: response,
-        timestamp: new Date().toISOString(),
-      }]);
+      const assistantMsg = await invoke<ChatMessage>('send_message', {
+        sessionId: currentConvId,
+        content: userContent,
+      });
+      setMessages(prev => [...prev, assistantMsg]);
     } catch (err) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: `抱歉，查询失败：${String(err)}`,
+        content: `抱歉，发送失败：${String(err)}`,
         timestamp: new Date().toISOString(),
       }]);
     } finally {
       setLoading(false);
+      await loadConversations();
+    }
+  };
+
+  const handleNewConversationAndSend = async (content: string) => {
+    setLoading(true);
+    try {
+      // 创建新会话
+      const conv = await invoke<ConversationInfo>('create_conversation', { firstMessage: content });
+      setCurrentConvId(conv.id);
+      setMessages([{
+        role: 'user',
+        content: content,
+        timestamp: new Date().toISOString(),
+      }]);
+      setInput('');
+
+      // 发送消息
+      const assistantMsg = await invoke<ChatMessage>('send_message', {
+        sessionId: conv.id,
+        content: content,
+      });
+      setMessages(prev => [...prev, assistantMsg]);
+    } catch (err) {
+      console.error('[ConversationTab] new conversation and send:', err);
+    } finally {
+      setLoading(false);
+      await loadConversations();
     }
   };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      {/* 会话列表 - 顶部横条 */}
+      <div style={{
+        display: 'flex',
+        gap: 8,
+        padding: '8px 12px',
+        borderBottom: '0.5px solid var(--color-border-tertiary)',
+        overflowX: 'auto',
+        flexShrink: 0,
+      }}>
+        <button
+          onClick={() => { setCurrentConvId(null); setMessages([]); }}
+          style={{
+            padding: '4px 12px',
+            fontSize: 11,
+            borderRadius: 12,
+            background: !currentConvId ? 'var(--color-brand)' : 'var(--color-background-secondary)',
+            border: 'none',
+            color: !currentConvId ? '#fff' : 'var(--color-text-secondary)',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          新对话
+        </button>
+        {conversations.map(conv => (
+          <div
+            key={conv.id}
+            onClick={() => { setCurrentConvId(conv.id); }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 8px',
+              fontSize: 11,
+              borderRadius: 12,
+              background: currentConvId === conv.id ? 'var(--color-brand)' : 'var(--color-background-secondary)',
+              color: currentConvId === conv.id ? '#fff' : 'var(--color-text-secondary)',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              maxWidth: 120,
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{conv.title}</span>
+            <button
+              onClick={(e) => handleDeleteConversation(conv.id, e)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'inherit',
+                cursor: 'pointer',
+                fontSize: 10,
+                padding: 0,
+                opacity: 0.6,
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {/* 消息区域 */}
       <div style={{ flex: 1, overflow: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
         {messages.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--color-text-tertiary)', fontSize: 12, marginTop: 40 }}>
-            问我关于今天的操作日志吧<br />
-            <span style={{ fontSize: 11 }}>例如："今天我做了什么？"</span>
+            {currentConvId ? '开始对话吧' : '输入内容开始新对话'}
           </div>
         )}
         {messages.map((msg, i) => (
@@ -132,6 +271,7 @@ export default function ConversationTab() {
         <div ref={messagesEndRef} />
       </div>
 
+      {/* 输入框 */}
       <form onSubmit={handleSubmit} style={{
         padding: '12px 16px',
         borderTop: '0.5px solid var(--color-border-tertiary)',
@@ -142,7 +282,7 @@ export default function ConversationTab() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="问我关于今天的操作..."
+          placeholder={currentConvId ? '输入内容...' : '输入内容开始新对话...'}
           style={{
             flex: 1,
             padding: '8px 12px',
