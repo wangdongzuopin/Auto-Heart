@@ -580,3 +580,206 @@ pub fn load_window_state(settings: State<'_, SettingsHandle>) -> Option<MainWind
     let s = settings.lock().unwrap();
     s.last_window_state.clone().map(|ws| ws.into())
 }
+
+// ──────────────────────────────────────────────
+// 对话命令
+// ──────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct ConversationInfo {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: usize,
+}
+
+#[derive(Serialize)]
+pub struct ChatMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub timestamp: String,
+}
+
+#[tauri::command]
+pub fn get_conversations(app: AppHandle) -> Vec<ConversationInfo> {
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+    let conversations = crate::conversation::list_conversations(&data_dir);
+
+    conversations
+        .into_iter()
+        .map(|c| ConversationInfo {
+            id: c.id,
+            title: c.title,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+            message_count: c.messages.len(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub fn get_conversation(id: String, app: AppHandle) -> Option<crate::conversation::Conversation> {
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+    crate::conversation::get_conversation(&data_dir, &id)
+}
+
+#[tauri::command]
+pub fn create_conversation(first_message: String, app: AppHandle) -> Result<ConversationInfo, String> {
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+    let conv = crate::conversation::Conversation::new(&first_message);
+    crate::conversation::save_conversation(&data_dir, &conv)?;
+
+    Ok(ConversationInfo {
+        id: conv.id,
+        title: conv.title,
+        created_at: conv.created_at,
+        updated_at: conv.updated_at,
+        message_count: 0,
+    })
+}
+
+#[tauri::command]
+pub fn delete_conversation(id: String, app: AppHandle) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+    crate::conversation::delete_conversation(&data_dir, &id)
+}
+
+#[tauri::command]
+pub async fn send_message(
+    session_id: String,
+    content: String,
+    app: AppHandle,
+    settings: State<'_, SettingsHandle>,
+    db: State<'_, DbPool>,
+) -> Result<ChatMessage, String> {
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+
+    // 获取或创建会话
+    let mut conv = crate::conversation::get_conversation(&data_dir, &session_id)
+        .unwrap_or_else(|| crate::conversation::Conversation::new(&content));
+
+    // 添加用户消息
+    let user_msg = crate::conversation::Message {
+        id: Uuid::new_v4().to_string(),
+        role: "user".to_string(),
+        content: content.clone(),
+        timestamp: chrono::Local::now().to_rfc3339(),
+    };
+    conv.messages.push(user_msg.clone());
+    conv.updated_at = chrono::Local::now().to_rfc3339();
+    crate::conversation::save_conversation(&data_dir, &conv)?;
+
+    // 调用 LLM
+    let settings_snap = settings.lock().unwrap().clone();
+
+    // 构建消息历史
+    let oai_messages: Vec<crate::model_router::OaiMessage> = conv.messages.iter().map(|m| {
+        crate::model_router::OaiMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        }
+    }).collect();
+
+    // 调用模型
+    let model_config = crate::model_router::build_model_config(
+        &settings_snap.chat_model,
+        &settings_snap.chat_model_name,
+        &settings_snap,
+    ).ok_or("Chat model not configured. Please set chat_model in settings.")?;
+
+    let response = crate::model_router::call_chat_model_with_messages(
+        &model_config,
+        &oai_messages,
+    ).await?;
+
+    // 添加助手消息
+    let assistant_msg = crate::conversation::Message {
+        id: Uuid::new_v4().to_string(),
+        role: "assistant".to_string(),
+        content: response.clone(),
+        timestamp: chrono::Local::now().to_rfc3339(),
+    };
+
+    // 更新会话
+    conv.messages.push(assistant_msg.clone());
+    conv.updated_at = chrono::Local::now().to_rfc3339();
+    crate::conversation::save_conversation(&data_dir, &conv)?;
+
+    // 检查是否包含意图关键词
+    if contains_intent_keywords(&content) {
+        let _ = parse_intent_from_chat(&content, &settings_snap, &db);
+    }
+
+    Ok(ChatMessage {
+        id: assistant_msg.id,
+        role: assistant_msg.role,
+        content: assistant_msg.content,
+        timestamp: assistant_msg.timestamp,
+    })
+}
+
+/// 检查消息是否包含意图关键词
+fn contains_intent_keywords(content: &str) -> bool {
+    let keywords = ["今天", "要做", "待办", "计划", "任务", "完成", "开始", "帮我"];
+    keywords.iter().any(|k| content.contains(k))
+}
+
+/// 从聊天内容解析意图并写入数据库
+fn parse_intent_from_chat(content: &str, settings: &AppSettings, db: &DbPool) -> Option<()> {
+    let prompt = format!(
+        "用户消息：{}\n\n请解析为任务列表，输出 JSON 数组（无其他内容）：\n[{{\"time\":\"HH:MM\",\"task\":\"任务描述\",\"tag\":\"关联模块\",\"status\":\"pending\"}}]",
+        content
+    );
+
+    let config = crate::model_router::build_model_config(
+        &settings.middle_model,
+        &settings.middle_model_name,
+        settings,
+    )?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    let router = crate::model_router::ModelRouter::new();
+    let response = rt.block_on(router.call_with_config(
+        &config,
+        &prompt,
+        Some("你是 Auto-Heart，解析用户任务。只输出 JSON 数组。"),
+    )).ok()?;
+
+    // 提取 JSON
+    let json_str = extract_json_array(&response);
+    if let Ok(tasks) = serde_json::from_str::<serde_json::Value>(json_str) {
+        if let Some(tasks_array) = tasks.as_array() {
+            if !tasks_array.is_empty() {
+                let tasks_json = serde_json::to_string(&tasks_array).unwrap_or_default();
+                if let Ok(db) = db.lock() {
+                    let id = Uuid::new_v4().to_string();
+                    let _ = db.execute(
+                        "INSERT INTO intent_history (id, raw_text, parsed_tasks, completion_status) VALUES (?1, ?2, ?3, 'active')",
+                        rusqlite::params![id, content, tasks_json],
+                    );
+                }
+            }
+        }
+    }
+
+    Some(())
+}
+
+/// 从文本中提取 JSON 数组
+fn extract_json_array(text: &str) -> &str {
+    if let Some(start) = text.find("```json") {
+        let inner = &text[start + 7..];
+        if let Some(end) = inner.find("```") {
+            return inner[..end].trim();
+        }
+    }
+    if let (Some(s), Some(e)) = (text.find('['), text.rfind(']')) {
+        return &text[s..=e];
+    }
+    text
+}

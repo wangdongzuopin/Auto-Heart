@@ -200,6 +200,12 @@ pub fn run() {
             // 窗口状态
             commands::save_window_state,
             commands::load_window_state,
+            // 对话
+            commands::get_conversations,
+            commands::get_conversation,
+            commands::create_conversation,
+            commands::delete_conversation,
+            commands::send_message,
         ])
         .run(tauri::generate_context!())
         .expect("Auto-Heart 运行失败");

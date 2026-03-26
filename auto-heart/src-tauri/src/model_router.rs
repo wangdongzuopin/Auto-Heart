@@ -22,10 +22,10 @@ pub struct ModelConfig {
     pub base_url: String,
 }
 
-#[derive(Debug, Serialize)]
-struct OaiMessage {
-    role: String,
-    content: String,
+#[derive(Debug, Clone, Serialize)]
+pub struct OaiMessage {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -358,4 +358,46 @@ pub fn default_base_url(provider: &str) -> &'static str {
         "openrouter"             => "https://openrouter.ai/api/v1",
         _                        => "http://localhost:11434/v1",
     }
+}
+
+/// 使用消息历史调用聊天模型
+pub async fn call_chat_model_with_messages(
+    config: &ModelConfig,
+    messages: &[OaiMessage],
+) -> Result<String, String> {
+    let request = OaiRequest {
+        model: config.model.clone(),
+        messages: messages.to_vec(),
+        max_tokens: Some(2000),
+        temperature: Some(0.7),
+    };
+
+    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Content-Type", "application/json")
+        .json(&request);
+
+    if config.provider == "openrouter" {
+        req = req
+            .header("HTTP-Referer", "https://auto-heart.app")
+            .header("X-Title", "Auto-Heart");
+    }
+
+    let response = req.send().await.map_err(|e| format!("HTTP error: {}", e))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status, body));
+    }
+
+    let resp: OaiResponse = response.json().await
+        .map_err(|e| format!("Parse error: {}", e))?;
+
+    resp.choices.first()
+        .map(|c| c.message.content.clone())
+        .ok_or_else(|| "No response from model".into())
 }
