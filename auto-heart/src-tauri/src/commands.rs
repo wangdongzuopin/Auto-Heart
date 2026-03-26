@@ -393,3 +393,140 @@ pub async fn send_daily_report(
 
     Ok(())
 }
+
+// ──────────────────────────────────────────────
+// 操作日志 + 对话命令
+// ──────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct OperationLogEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub file_path: String,
+    pub change_type: String,
+    pub intention_desc: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct TrendStats {
+    pub days: i32,
+    pub total_changes: i32,
+    pub avg_per_day: f64,
+    pub top_modules: Vec<String>,
+}
+
+/// 查询当日操作日志
+#[tauri::command]
+pub fn query_operation_logs(date: String, db: State<'_, DbPool>) -> Vec<OperationLogEntry> {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    let date_filter = if date == "today" {
+        "date(timestamp) = date('now')"
+    } else {
+        return vec![];
+    };
+
+    let mut stmt = match db.prepare(&format!(
+        "SELECT id, timestamp, file_path, change_type, intention_desc, tags \
+         FROM operation_log WHERE {} ORDER BY timestamp DESC LIMIT 100",
+        date_filter
+    )) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    stmt.query_map([], |row| {
+        let tags_str: String = row.get(5)?;
+        let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+        Ok(OperationLogEntry {
+            id: row.get(0)?,
+            timestamp: row.get(1)?,
+            file_path: row.get(2)?,
+            change_type: row.get(3)?,
+            intention_desc: row.get(4)?,
+            tags,
+        })
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// 搜索文件变更记录
+#[tauri::command]
+pub fn search_file_changes(
+    keyword: String,
+    days_back: Option<i64>,
+    db: State<'_, DbPool>,
+) -> Vec<(String, String, String)> {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    let days = days_back.unwrap_or(7);
+    let param = format!("-{} days", days);
+
+    let mut stmt = match db.prepare(
+        "SELECT file_path, change_type, timestamp FROM file_changes \
+         WHERE file_path LIKE ?1 AND timestamp > datetime('now', ?2) \
+         ORDER BY timestamp DESC LIMIT 50",
+    ) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+
+    let pattern = format!("%{}%", keyword);
+    stmt.query_map(rusqlite::params![pattern, param], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// 获取趋势统计
+#[tauri::command]
+pub fn get_trend_stats(days: i64, db: State<'_, DbPool>) -> TrendStats {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return TrendStats { days: days as i32, total_changes: 0, avg_per_day: 0.0, top_modules: vec![] },
+    };
+
+    let param = format!("-{} days", days);
+    let total: i32 = db.query_row(
+        "SELECT COUNT(*) FROM file_changes WHERE timestamp > datetime('now', ?1)",
+        rusqlite::params![param],
+        |_row| _row.get(0),
+    ).unwrap_or(0);
+
+    let avg = total as f64 / days as f64;
+
+    let mut stmt = match db.prepare(
+        "SELECT file_path, COUNT(*) as cnt FROM file_changes \
+         WHERE timestamp > datetime('now', ?1) \
+         GROUP BY file_path ORDER BY cnt DESC LIMIT 5",
+    ) {
+        Ok(s) => s,
+        Err(_) => return TrendStats { days: days as i32, total_changes: total, avg_per_day: avg, top_modules: vec![] },
+    };
+
+    let top: Vec<String> = stmt.query_map(rusqlite::params![param], |row| {
+        row.get::<_, String>(0)
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default();
+
+    TrendStats {
+        days: days as i32,
+        total_changes: total,
+        avg_per_day: avg,
+        top_modules: top,
+    }
+}

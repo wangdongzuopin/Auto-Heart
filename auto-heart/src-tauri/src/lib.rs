@@ -193,6 +193,10 @@ pub fn run() {
             commands::get_daily_report,
             commands::update_report_content,
             commands::send_daily_report,
+            // 对话 + 日志查询
+            commands::query_operation_logs,
+            commands::search_file_changes,
+            commands::get_trend_stats,
         ])
         .run(tauri::generate_context!())
         .expect("Auto-Heart 运行失败");
