@@ -4,8 +4,9 @@ import { isTauriRuntime } from '../tauriRuntime';
 import TodayTab from './TodayTab';
 import SemanticMapTab from './SemanticMapTab';
 import SettingsTab from './SettingsTab';
+import ConversationTab from './ConversationTab';
 
-type Tab = 'today' | 'semantic-map' | 'settings';
+type Tab = 'today' | 'semantic-map' | 'settings' | 'conversation';
 
 /**
  * MainWindow — Auto-Heart 主窗口面板
@@ -21,6 +22,7 @@ export default function MainWindow() {
   const tabs: { id: Tab; label: string }[] = [
     { id: 'today', label: '今天' },
     { id: 'semantic-map', label: '语义地图' },
+    { id: 'conversation', label: '对话' },
     { id: 'settings', label: '设置' },
   ];
 
@@ -160,6 +162,7 @@ export default function MainWindow() {
       <div style={{ flex: 1, overflow: 'auto' }}>
         {activeTab === 'today' && <TodayTab />}
         {activeTab === 'semantic-map' && <SemanticMapTab />}
+        {activeTab === 'conversation' && <ConversationTab />}
         {activeTab === 'settings' && <SettingsTab />}
       </div>
     </div>
