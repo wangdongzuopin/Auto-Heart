@@ -128,7 +128,6 @@ pub fn run() {
             // ── 设置 ──
             let watch_paths: Vec<PathBuf> =
                 app_settings.watch_paths.iter().map(PathBuf::from).collect();
-            let intent_doc_path = app_settings.intent_doc_path.clone();
             let settings_handle: SettingsHandle = Arc::new(Mutex::new(app_settings.clone()));
             app.manage(settings_handle.clone());
 
@@ -140,12 +139,6 @@ pub fn run() {
 
             // ── 文件监听（有配置时启动）──
             let mut all_paths = watch_paths;
-            if !intent_doc_path.is_empty() {
-                let p = PathBuf::from(&intent_doc_path);
-                if let Some(parent) = p.parent() {
-                    all_paths.push(parent.to_path_buf());
-                }
-            }
             if !all_paths.is_empty() {
                 start_file_watcher(db.clone(), all_paths);
             }
