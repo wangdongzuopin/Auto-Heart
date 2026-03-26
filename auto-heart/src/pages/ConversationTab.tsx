@@ -15,14 +15,6 @@ interface ConversationInfo {
   message_count: number;
 }
 
-interface OperationLogEntry {
-  id: string;
-  timestamp: string;
-  file_path: string;
-  intention_desc: string;
-  tags: string[];
-}
-
 export default function ConversationTab() {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
   const [currentConvId, setCurrentConvId] = useState<string | null>(null);
@@ -70,23 +62,6 @@ export default function ConversationTab() {
       }
     } catch (e) {
       console.error('[ConversationTab] load conversation:', e);
-    }
-  };
-
-  const handleNewConversation = async () => {
-    if (!input.trim()) return;
-    try {
-      const conv = await invoke<ConversationInfo>('create_conversation', { firstMessage: input.trim() });
-      setCurrentConvId(conv.id);
-      setMessages([{
-        role: 'user',
-        content: input.trim(),
-        timestamp: new Date().toISOString(),
-      }]);
-      setInput('');
-      await loadConversations();
-    } catch (e) {
-      console.error('[ConversationTab] create conversation:', e);
     }
   };
 

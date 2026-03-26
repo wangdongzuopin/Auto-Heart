@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, PhysicalPosition } from '@tauri-apps/api/window';
 import { isTauriRuntime } from '../tauriRuntime';
 import TodayTab from './TodayTab';
 import SemanticMapTab from './SemanticMapTab';
@@ -27,7 +27,7 @@ export default function MainWindow() {
         const state = await invoke<{ x: number; y: number; width: number; height: number; is_maximized: boolean } | null>('load_window_state');
         if (state) {
           const win = getCurrentWindow();
-          await win.setPosition({ type: 'Physical', x: state.x, y: state.y });
+          await win.setPosition(new PhysicalPosition(state.x, state.y));
           if (state.is_maximized) {
             await win.maximize();
           }
