@@ -42,6 +42,10 @@ pub struct AppSettings {
     // ── Ollama 本地配置 ──
     /// Ollama 服务地址（默认 http://localhost:11434）
     pub ollama_base_url: String,
+
+    // ── 主动建议 ──
+    pub proactive_suggestions: bool,
+    pub critical_keywords: String,
 }
 
 impl Default for AppSettings {
@@ -66,6 +70,8 @@ impl Default for AppSettings {
             deepseek_api_key: String::new(),
             openrouter_api_key: String::new(),
             ollama_base_url: String::new(),
+            proactive_suggestions: true,
+            critical_keywords: "auth,security,password,token,payment,config,middleware,permission".to_string(),
         }
     }
 }
