@@ -2,6 +2,14 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+/** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
+async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
+  );
+  return Promise.race([invoke<T>(cmd, args), timeout]) as Promise<T>;
+}
+
 export interface QueueMessage {
   id: string;
   priority: number;
@@ -23,7 +31,7 @@ export function useMessageQueue() {
 
   const fetchQueue = useCallback(async () => {
     try {
-      const list = await invoke<QueueMessage[]>('get_message_queue');
+      const list = await invokeWithTimeout<QueueMessage[]>('get_message_queue');
       setMessages(list);
     } catch (err) {
       console.error('[useMessageQueue] fetch failed:', err);
@@ -32,7 +40,7 @@ export function useMessageQueue() {
 
   const dismiss = useCallback(async (id: string) => {
     try {
-      await invoke('dismiss_message', { id });
+      await invokeWithTimeout('dismiss_message', { id });
       setMessages((prev) => prev.filter((m) => m.id !== id));
       setLatest((prev) => (prev?.id === id ? null : prev));
     } catch (err) {
@@ -42,7 +50,7 @@ export function useMessageQueue() {
 
   const ack = useCallback(async (id: string) => {
     try {
-      await invoke('ack_message', { id });
+      await invokeWithTimeout('ack_message', { id });
       setMessages((prev) => prev.filter((m) => m.id !== id));
       setLatest((prev) => (prev?.id === id ? null : prev));
     } catch (err) {

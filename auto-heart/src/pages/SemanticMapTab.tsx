@@ -2,6 +2,14 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
+/** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
+async function invokeWithTimeout<T>(cmd: string): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
+  );
+  return Promise.race([invoke<T>(cmd), timeout]) as Promise<T>;
+}
+
 interface SemanticModule {
   id: string;
   module_name: string;
@@ -64,9 +72,9 @@ export default function SemanticMapTab() {
   const loadData = async () => {
     try {
       const [mods, decs, tds] = await Promise.all([
-        invoke<SemanticModule[]>('get_semantic_modules'),
-        invoke<DecisionEntry[]>('get_decision_log'),
-        invoke<TechDebtEntry[]>('get_tech_debt'),
+        invokeWithTimeout<SemanticModule[]>('get_semantic_modules'),
+        invokeWithTimeout<DecisionEntry[]>('get_decision_log'),
+        invokeWithTimeout<TechDebtEntry[]>('get_tech_debt'),
       ]);
       if (mods.length === 0 && decs.length === 0) {
         setModules(DEMO_MODULES);

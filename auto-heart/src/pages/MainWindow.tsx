@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { isTauriRuntime } from '../tauriRuntime';
 import TodayTab from './TodayTab';
 import SemanticMapTab from './SemanticMapTab';
@@ -30,9 +30,9 @@ export default function MainWindow() {
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        background: 'var(--color-background-primary)',
-        color: 'var(--color-text-primary)',
-        fontFamily: 'var(--font-sans)',
+        background: 'var(--color-background-primary, #0a0a14)',
+        color: 'var(--color-text-primary, #eeeeee)',
+        fontFamily: 'var(--font-sans, system-ui, sans-serif)',
       }}
     >
       {/* 标题栏 */}
@@ -92,8 +92,13 @@ export default function MainWindow() {
 
         {/* 关闭按钮 */}
         <button
-          onClick={() => {
-            if (isTauriRuntime()) getCurrentWindow().close();
+          onClick={async () => {
+            if (!isTauriRuntime()) return;
+            try {
+              await invoke('close_main_window');
+            } catch (e) {
+              console.error('[MainWindow] close_main_window:', e);
+            }
           }}
           style={{
             marginLeft: 8,

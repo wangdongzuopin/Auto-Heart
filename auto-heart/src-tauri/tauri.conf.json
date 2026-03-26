@@ -24,7 +24,7 @@
         "skipTaskbar": true,
         "visible": true,
         "shadow": false,
-        "url": "index.html#orb"
+        "url": "index.html?view=orb"
       }
     ],
     "security": {

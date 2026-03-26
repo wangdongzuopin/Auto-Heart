@@ -4,6 +4,14 @@ import { listen } from '@tauri-apps/api/event';
 import { useMessageQueue } from '../hooks/useMessageQueue';
 import { useSettings } from '../hooks/useSettings';
 
+/** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
+async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
+  );
+  return Promise.race([invoke<T>(cmd, args), timeout]) as Promise<T>;
+}
+
 interface TodayTask {
   time: string;
   task: string;
@@ -39,7 +47,7 @@ export default function TodayTab() {
 
   const loadTasks = useCallback(async () => {
     try {
-      const list = await invoke<TodayTask[]>('get_today_tasks');
+      const list = await invokeWithTimeout<TodayTask[]>('get_today_tasks');
       if (list.length === 0) { setTasks(DEMO_TASKS); setIsDemo(true); }
       else { setTasks(list); setIsDemo(false); }
     } catch { setTasks(DEMO_TASKS); setIsDemo(true); }
@@ -47,18 +55,18 @@ export default function TodayTab() {
 
   const loadIntent = useCallback(async () => {
     try {
-      const rec = await invoke<{ raw_text: string; parsed: boolean } | null>('get_today_intent');
+      const rec = await invokeWithTimeout<{ raw_text: string; parsed: boolean } | null>('get_today_intent');
       setIntent(rec);
     } catch { setIntent(null); }
   }, []);
 
   const loadReport = useCallback(async () => {
     try {
-      const r = await invoke<ReportData | null>('get_today_report');
+      const r = await invokeWithTimeout<ReportData | null>('get_today_report');
       setReport(r);
-      if (r && !editingReport) setEditContent(r.content);
+      if (r) setEditContent(r.content);
     } catch { setReport(null); }
-  }, [editingReport]);
+  }, []);
 
   useEffect(() => {
     loadTasks(); loadIntent(); loadReport();
@@ -79,7 +87,7 @@ export default function TodayTab() {
   const saveEdit = async () => {
     if (!report) return;
     try {
-      await invoke('update_report_content', { date: report.date, content: editContent });
+      await invokeWithTimeout('update_report_content', { date: report.date, content: editContent });
       setEditingReport(false);
       loadReport();
     } catch (e) { console.error(e); }
@@ -90,7 +98,7 @@ export default function TodayTab() {
     setSending(channel);
     setSendResult(null);
     try {
-      await invoke('send_daily_report', { date: report.date, channel });
+      await invokeWithTimeout('send_daily_report', { date: report.date, channel });
       setSendResult({ ok: true, msg: channel === 'dingtalk' ? '已发送到钉钉 ✓' : '已发送到飞书 ✓' });
       loadReport();
     } catch (e) {

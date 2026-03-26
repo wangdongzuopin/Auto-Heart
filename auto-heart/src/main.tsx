@@ -1,29 +1,25 @@
-import { StrictMode, Component, ErrorInfo, ReactNode } from 'react';
+import {
+  StrictMode,
+  Component,
+  ErrorInfo,
+  ReactNode,
+} from 'react';
 import ReactDOM from 'react-dom/client';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { isTauriRuntime } from './tauriRuntime';
 import './styles.css';
 import App from './App';
 import MainWindow from './pages/MainWindow';
 
-/**
- * 用 location.hash 区分 Orb / 主面板（#main / #orb）。
- * 纯浏览器预览：无 Tauri 时默认主面板（避免 Orb 调窗口 API）；显式 #orb 仍可看小球 UI。
- */
-function resolveIsOrb(): boolean {
-  const h = (window.location.hash || '').replace(/^#/, '').split(/[?&]/)[0];
-  if (h === 'main') return false;
-  if (h === 'orb') return true;
-  if (!isTauriRuntime()) return false;
-  try {
-    return getCurrentWindow().label === 'orb';
-  } catch {
-    return true;
-  }
+/** 从 URL 读面板类型 */
+function viewFromUrl(): 'orb' | 'main' | '' {
+  const q = new URLSearchParams(window.location.search).get('view');
+  if (q === 'main' || q === 'orb') return q;
+  return '';
 }
 
-const isOrb = resolveIsOrb();
+// 模块加载时同步解析（这个阶段 window.location.search 已可用）
+const isOrb = viewFromUrl() === 'orb';
 
+// 在任何 React 代码执行前同步设置背景
 if (isOrb) {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
@@ -32,17 +28,18 @@ if (isOrb) {
   document.body.style.background = '#0a0a14';
 }
 
+function Shell() {
+  return isOrb ? <App /> : <MainWindow />;
+}
+
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
   state = { error: null as string | null };
-
   static getDerivedStateFromError(error: Error) {
     return { error: `${error.message}\n${error.stack}` };
   }
-
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('[Auto-Heart] Render error:', error, info);
   }
-
   render() {
     if (this.state.error) {
       return (
@@ -65,7 +62,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
-      {isOrb ? <App /> : <MainWindow />}
+      <Shell />
     </ErrorBoundary>
   </StrictMode>,
 );

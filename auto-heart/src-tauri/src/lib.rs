@@ -20,21 +20,38 @@ use tauri::{
 };
 
 #[tauri::command]
-fn open_main_window(app: AppHandle) -> Result<(), String> {
+async fn open_main_window(app: AppHandle) -> Result<(), String> {
+    eprintln!("[open_main_window] called");
     if let Some(window) = app.get_webview_window("main") {
+        eprintln!("[open_main_window] main window already exists, focusing...");
         window.set_focus().map_err(|e| e.to_string())?;
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(&app, "main", WebviewUrl::App("index.html#main".into()))
-        .title("Auto-Heart")
-        .inner_size(480.0, 680.0)
-        .center()
-        .decorations(true)
-        .resizable(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+    eprintln!("[open_main_window] building window...");
+    WebviewWindowBuilder::new(
+        &app,
+        "main",
+        WebviewUrl::App("index.html?view=main".into()),
+    )
+    .title("Auto-Heart")
+    .inner_size(480.0, 680.0)
+    .center()
+    .decorations(true)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
 
+    eprintln!("[open_main_window] window created successfully");
+    Ok(())
+}
+
+/// 由 Rust 直接关主窗口，避免子 WebView 里 `plugin:window|close` 权限/IPC 异常导致关不掉
+#[tauri::command]
+fn close_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("main") {
+        w.close().map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -141,6 +158,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main_window,
+            close_main_window,
             // 消息队列
             commands::get_message_queue,
             commands::dismiss_message,

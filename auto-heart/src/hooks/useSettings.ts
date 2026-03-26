@@ -1,6 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
+/** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
+async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
+  );
+  return Promise.race([invoke<T>(cmd, args), timeout]) as Promise<T>;
+}
+
 export interface Settings {
   // 基础
   intentDocPath: string;
@@ -99,9 +107,9 @@ export function useSettings() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    invoke<Record<string, unknown>>('load_settings_cmd')
+    invokeWithTimeout<Record<string, unknown>>('load_settings_cmd')
       .then((raw) => setSettings(fromRust(raw)))
-      .catch(() => {})
+      .catch((e) => console.warn('[useSettings] load timeout:', e))
       .finally(() => setLoading(false));
   }, []);
 
@@ -109,7 +117,7 @@ export function useSettings() {
     const updated = { ...settings, ...patch };
     setSettings(updated);
     try {
-      await invoke('save_settings', { newSettings: toRust(updated) });
+      await invokeWithTimeout('save_settings', { newSettings: toRust(updated) });
     } catch (err) {
       console.error('[useSettings] save failed:', err);
     }
