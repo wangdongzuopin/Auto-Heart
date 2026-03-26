@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauriRuntime } from '../tauriRuntime';
 import TodayTab from './TodayTab';
 import SemanticMapTab from './SemanticMapTab';
@@ -17,6 +18,57 @@ type Tab = 'today' | 'semantic-map' | 'settings' | 'conversation';
  * - 内容区
  */
 export default function MainWindow() {
+  // ── 窗口位置缓存 ──
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    const restorePosition = async () => {
+      try {
+        const state = await invoke<{ x: number; y: number; width: number; height: number; is_maximized: boolean } | null>('load_window_state');
+        if (state) {
+          const win = getCurrentWindow();
+          await win.setPosition({ type: 'Physical', x: state.x, y: state.y });
+          if (state.is_maximized) {
+            await win.maximize();
+          }
+        }
+      } catch (e) {
+        console.warn('[MainWindow] restore position failed:', e);
+      }
+    };
+
+    restorePosition();
+  }, []);
+
+  // 关闭窗口时保存位置
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    const handleClose = async () => {
+      try {
+        const win = getCurrentWindow();
+        const pos = await win.outerPosition();
+        const size = await win.outerSize();
+        await invoke('save_window_state', {
+          state: {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+            is_maximized: await win.isMaximized(),
+          },
+        });
+      } catch (e) {
+        console.warn('[MainWindow] save position failed:', e);
+      }
+    };
+
+    // 监听窗口关闭事件
+    getCurrentWindow().onCloseRequested(async () => {
+      await handleClose();
+    });
+  }, []);
+
   const [activeTab, setActiveTab] = useState<Tab>('today');
 
   const tabs: { id: Tab; label: string }[] = [
