@@ -10,7 +10,7 @@ use heartbeat::{
     start_deep_heartbeat, start_file_watcher, start_middle_heartbeat, start_operation_log_heartbeat,
     start_shallow_heartbeat,
 };
-use settings::{load_settings, SettingsHandle};
+use settings::{load_settings, SettingsHandle, auto_detect_watch_paths};
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -126,8 +126,14 @@ pub fn run() {
             app.manage(db.clone());
 
             // ── 设置 ──
-            let watch_paths: Vec<PathBuf> =
-                app_settings.watch_paths.iter().map(PathBuf::from).collect();
+            let watch_paths: Vec<PathBuf> = if app_settings.watch_paths.is_empty() {
+                auto_detect_watch_paths()
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect()
+            } else {
+                app_settings.watch_paths.iter().map(PathBuf::from).collect()
+            };
             let settings_handle: SettingsHandle = Arc::new(Mutex::new(app_settings.clone()));
             app.manage(settings_handle.clone());
 

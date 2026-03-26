@@ -112,3 +112,55 @@ pub fn save_settings_to_disk(app_data_dir: &PathBuf, settings: &AppSettings) -> 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     std::fs::write(path, content).map_err(|e| e.to_string())
 }
+
+/// 自动检测常见开发目录（当 watch_paths 为空时调用）
+pub fn auto_detect_watch_paths() -> Vec<String> {
+    let mut paths = vec![];
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(user_dir) = std::env::var("USERPROFILE") {
+            let base = PathBuf::from(&user_dir);
+            // 常见开发目录
+            for name in &["Documents", "Desktop", "Code", "Projects"] {
+                let path = base.join(name);
+                if path.exists() {
+                    paths.push(path.to_string_lossy().to_string());
+                }
+            }
+            // 也检查用户主目录本身（有些人在 ~/dev 下开发）
+            let home_dev = base.join("dev");
+            if home_dev.exists() {
+                paths.push(home_dev.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let base = PathBuf::from(&home);
+            for name in &["Documents", "Code", "Projects", "Developer"] {
+                let path = base.join(name);
+                if path.exists() {
+                    paths.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let base = PathBuf::from(&home);
+            for name in &["Documents", "Code", "projects", "dev"] {
+                let path = base.join(name);
+                if path.exists() {
+                    paths.push(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    paths
+}
