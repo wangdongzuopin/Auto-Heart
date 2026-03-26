@@ -53,13 +53,7 @@ pub fn start_shallow_heartbeat(app: AppHandle, db: DbPool, settings: SettingsHan
                 log_active_app(&db, &active_app);
             }
 
-            // 2. 检查意图文档是否更新
-            let intent_path = { settings.lock().unwrap().intent_doc_path.clone() };
-            if !intent_path.is_empty() {
-                check_intent_doc_update(&db, &intent_path);
-            }
-
-            // 3. 自然节点检测：若 90 秒内无文件变更，释放 P1 消息
+            // 2. 自然节点检测：若 90 秒内无文件变更，释放 P1 消息
             let has_pending = check_and_flush_pending_messages(&app, &db);
             if has_pending {
                 let _ = app.emit("message_queue:flush", ());
@@ -1023,7 +1017,7 @@ fn check_proactive_suggestions(
         count > 0
     };
 
-    if !intent_updated && !settings.intent_doc_path.is_empty() {
+    if !intent_updated {
         emit_agent_alert(
             app,
             "intent_reminder",

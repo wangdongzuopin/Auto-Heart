@@ -535,7 +535,7 @@ pub fn get_trend_stats(days: i64, db: State<'_, DbPool>) -> TrendStats {
 // 窗口状态命令
 // ──────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct MainWindowState {
     pub x: i32,
     pub y: i32,
@@ -741,7 +741,7 @@ fn parse_intent_from_chat(content: &str, settings: &AppSettings, db: &DbPool) ->
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()?;
+        .build().ok()?;
 
     let router = crate::model_router::ModelRouter::new();
     let response = rt.block_on(router.call_with_config(
