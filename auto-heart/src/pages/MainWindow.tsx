@@ -79,7 +79,41 @@ export default function MainWindow() {
     };
   }, []);
 
-  const [activeTab, setActiveTab] = useState<Tab>('today');
+  // 监听导航事件
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let unlisten: (() => void) | undefined;
+
+    const setup = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<string>('navigate_to', (event) => {
+        const tab = event.payload as Tab;
+        if (['today', 'semantic-map', 'conversation', 'settings'].includes(tab)) {
+          setActiveTab(tab);
+        }
+      });
+    };
+
+    setup();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  // 从 URL 参数获取初始 Tab
+const getInitialTab = (): Tab => {
+  if (!isTauriRuntime()) return 'today';
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get('view');
+  if (view === 'conversation') return 'conversation';
+  if (view === 'semantic-map') return 'semantic-map';
+  if (view === 'settings') return 'settings';
+  return 'today';
+};
+
+const [activeTab, setActiveTab] = useState<Tab>(getInitialTab);
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'today', label: '今天' },

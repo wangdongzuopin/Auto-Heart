@@ -34,7 +34,7 @@ function App() {
 
   const handleOrbClick = useCallback(async () => {
     try {
-      await invoke('open_main_window');
+      await invoke('open_main_window_with_view', { view: 'conversation' });
     } catch (err) {
       console.error('Failed to open main window:', err);
     }

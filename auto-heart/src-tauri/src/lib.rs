@@ -19,7 +19,7 @@ use chrono::Local;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 #[tauri::command]
@@ -46,6 +46,37 @@ async fn open_main_window(app: AppHandle) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     eprintln!("[open_main_window] window created successfully");
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_main_window_with_view(app: AppHandle, view: String) -> Result<(), String> {
+    eprintln!("[open_main_window_with_view] called with view: {}", view);
+
+    // 如果窗口已存在，只发送导航事件
+    if let Some(window) = app.get_webview_window("main") {
+        eprintln!("[open_main_window_with_view] main window exists, sending navigate event");
+        window.emit("navigate_to", view).map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // 否则创建新窗口
+    eprintln!("[open_main_window_with_view] building new window with view: {}", view);
+    WebviewWindowBuilder::new(
+        &app,
+        "main",
+        WebviewUrl::App(format!("index.html?view={}", view).into()),
+    )
+    .title("Auto-Heart")
+    .inner_size(480.0, 680.0)
+    .center()
+    .decorations(true)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    eprintln!("[open_main_window_with_view] window created successfully");
     Ok(())
 }
 
@@ -172,6 +203,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_main_window,
+            open_main_window_with_view,
             close_main_window,
             // 消息队列
             commands::get_message_queue,
