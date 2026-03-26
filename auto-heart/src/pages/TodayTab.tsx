@@ -26,18 +26,11 @@ interface ReportData {
   status: 'draft' | 'confirmed' | 'sent';
 }
 
-const DEMO_TASKS: TodayTask[] = [
-  { time: '10:00', task: 'refreshToken 过期校验', tag: 'auth/guard.ts', status: 'pending' },
-  { time: '13:00', task: 'dashboard 接口联调', tag: 'UserService', status: 'pending' },
-  { time: '14:30', task: '技术评审 — 我来帮你整理', tag: '进行中', status: 'active' },
-  { time: '18:00', task: '日报', tag: '我来写', status: 'pending' },
-];
 
 export default function TodayTab() {
   const [tasks, setTasks] = useState<TodayTask[]>([]);
   const [intent, setIntent] = useState<{ raw_text: string; parsed: boolean } | null>(null);
   const [report, setReport] = useState<ReportData | null>(null);
-  const [isDemo, setIsDemo] = useState(false);
   const [editingReport, setEditingReport] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [sending, setSending] = useState<string | null>(null); // 'dingtalk' | 'feishu'
@@ -48,9 +41,10 @@ export default function TodayTab() {
   const loadTasks = useCallback(async () => {
     try {
       const list = await invokeWithTimeout<TodayTask[]>('get_today_tasks');
-      if (list.length === 0) { setTasks(DEMO_TASKS); setIsDemo(true); }
-      else { setTasks(list); setIsDemo(false); }
-    } catch { setTasks(DEMO_TASKS); setIsDemo(true); }
+      setTasks(list);
+    } catch {
+      // 网络或数据库错误，保持空状态
+    }
   }, []);
 
   const loadIntent = useCallback(async () => {
@@ -132,9 +126,8 @@ export default function TodayTab() {
 
       {/* 任务列表 */}
       <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-          {isDemo ? '任务示例' : '今日任务'}
-          {isDemo && <span style={{ fontSize: 9, color: 'var(--color-text-tertiary)', background: 'var(--color-background-secondary)', padding: '1px 6px', borderRadius: 4 }}>配置意图文档路径后自动替换</span>}
+        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>
+          今日任务
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
           {tasks.map((t, i) => (

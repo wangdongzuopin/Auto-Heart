@@ -11,7 +11,7 @@ import './App.css';
 const POS_KEY = 'auto-heart:orb-pos-v3';
 
 /** WebView2 透明窗口对 alpha=0 区域常不做命中测试；铺极淡底色保证能收到指针事件 */
-const HIT_BG = 'rgba(0, 0, 0, 0.03)';
+const HIT_BG = 'transparent';
 
 interface IncomingMessage {
   id: string;
