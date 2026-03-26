@@ -939,6 +939,35 @@ fn save_operation_logs(db: &DbPool, analysis: &IntentionAnalysis, chunk_id: &str
 }
 
 // ──────────────────────────────────────────────
+// 操作日志心跳 — 每 5 分钟（意图分析）
+// ──────────────────────────────────────────────
+
+pub fn start_operation_log_heartbeat(
+    app: AppHandle,
+    db: DbPool,
+    settings: SettingsHandle,
+) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(300)); // 5 分钟
+
+            let changes = collect_recent_file_changes(&db, 5);
+            if changes.is_empty() {
+                continue;
+            }
+
+            let chunk_id = Uuid::new_v4().to_string();
+            let settings_snap = { settings.lock().unwrap().clone() };
+
+            if let Some(analysis) = call_intention_analysis(&settings_snap, &changes) {
+                eprintln!("[operation_log] 分析了 {} 项变更", analysis.intentions.len());
+                save_operation_logs(&db, &analysis, &chunk_id);
+            }
+        }
+    });
+}
+
+// ──────────────────────────────────────────────
 // 文件系统监听器
 // ──────────────────────────────────────────────
 

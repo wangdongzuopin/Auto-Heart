@@ -7,7 +7,8 @@ mod settings;
 
 use database::init_database;
 use heartbeat::{
-    start_deep_heartbeat, start_file_watcher, start_middle_heartbeat, start_shallow_heartbeat,
+    start_deep_heartbeat, start_file_watcher, start_middle_heartbeat, start_operation_log_heartbeat,
+    start_shallow_heartbeat,
 };
 use settings::{load_settings, SettingsHandle};
 
@@ -135,6 +136,7 @@ pub fn run() {
             start_shallow_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
             start_middle_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
             start_deep_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
+            start_operation_log_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
 
             // ── 文件监听（有配置时启动）──
             let mut all_paths = watch_paths;
