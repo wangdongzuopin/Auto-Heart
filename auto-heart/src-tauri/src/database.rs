@@ -91,6 +91,18 @@ fn create_tables(conn: &Connection) -> Result<()> {
             timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- 操作日志（LLM 意图分析结果）
+        CREATE TABLE IF NOT EXISTS operation_log (
+            id              TEXT PRIMARY KEY,
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            file_path       TEXT NOT NULL,
+            change_type     TEXT NOT NULL,
+            intention_desc  TEXT NOT NULL DEFAULT '',
+            confidence      REAL DEFAULT 0.5,
+            tags            TEXT DEFAULT '[]',
+            chunk_id        TEXT
+        );
+
         -- 日报
         CREATE TABLE IF NOT EXISTS daily_reports (
             id          TEXT PRIMARY KEY,
@@ -104,6 +116,8 @@ fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_file_changes_time ON file_changes(timestamp);
         CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status, priority);
         CREATE INDEX IF NOT EXISTS idx_intent_history_date ON intent_history(created_at);
+        CREATE INDEX IF NOT EXISTS idx_operation_log_time ON operation_log(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_operation_log_chunk ON operation_log(chunk_id);
         ",
     )?;
 
