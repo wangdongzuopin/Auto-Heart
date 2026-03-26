@@ -44,6 +44,8 @@ export default function MainWindow() {
   useEffect(() => {
     if (!isTauriRuntime()) return;
 
+    let prevented = false;
+
     const handleClose = async () => {
       try {
         const win = getCurrentWindow();
@@ -64,9 +66,17 @@ export default function MainWindow() {
     };
 
     // 监听窗口关闭事件
-    getCurrentWindow().onCloseRequested(async () => {
+    const unlisten = getCurrentWindow().onCloseRequested(async (event) => {
+      if (prevented) return;
+      prevented = true;
+      event.preventDefault();
       await handleClose();
+      await invoke('close_main_window');
     });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   const [activeTab, setActiveTab] = useState<Tab>('today');
@@ -149,9 +159,23 @@ export default function MainWindow() {
           onClick={async () => {
             if (!isTauriRuntime()) return;
             try {
+              // 先保存窗口位置
+              const win = getCurrentWindow();
+              const pos = await win.outerPosition();
+              const size = await win.outerSize();
+              await invoke('save_window_state', {
+                state: {
+                  x: pos.x,
+                  y: pos.y,
+                  width: size.width,
+                  height: size.height,
+                  is_maximized: await win.isMaximized(),
+                },
+              });
+              // 再关闭
               await invoke('close_main_window');
             } catch (e) {
-              console.error('[MainWindow] close_main_window:', e);
+              console.error('[MainWindow] close:', e);
             }
           }}
           style={{
