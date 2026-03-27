@@ -20,6 +20,7 @@ pub struct ModelConfig {
     pub model: String,
     pub api_key: String,
     pub base_url: String,
+    pub chat_endpoint: String, // e.g. "/v1/chat/completions" or "/v1/text/chatcompletion_v2"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,7 +165,7 @@ impl ModelRouter {
             max_tokens: Some(2000),
             temperature: Some(0.3),
         };
-        let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+        let url = format!("{}{}", config.base_url.trim_end_matches('/'), config.chat_endpoint);
 
         let mut req = self.client
             .post(&url)
@@ -258,6 +259,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.kimi_api_key.clone(),
                 base_url: default_base_url("kimi").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "qwen" => {
@@ -267,6 +269,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.qwen_api_key.clone(),
                 base_url: default_base_url("qwen").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "minimax" => {
@@ -276,6 +279,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.minimax_api_key.clone(),
                 base_url: default_base_url("minimax").to_string(),
+                chat_endpoint: "/v1/text/chatcompletion_v2".to_string(),
             })
         }
         "gpt" => {
@@ -285,6 +289,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.gpt_api_key.clone(),
                 base_url: default_base_url("openai").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "claude" => {
@@ -294,6 +299,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.claude_api_key.clone(),
                 base_url: default_base_url("anthropic").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "deepseek" => {
@@ -303,6 +309,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.deepseek_api_key.clone(),
                 base_url: default_base_url("deepseek").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "openrouter" => {
@@ -312,6 +319,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.openrouter_api_key.clone(),
                 base_url: default_base_url("openrouter").to_string(),
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         "ollama" => {
@@ -324,7 +332,8 @@ pub fn build_model_config(
                 provider: "ollama".to_string(),
                 model: effective_model,
                 api_key: "ollama".to_string(),
-                base_url: format!("{}/v1", base),
+                base_url: base,
+                chat_endpoint: "/v1/chat/completions".to_string(),
             })
         }
         _ => None,
@@ -336,7 +345,7 @@ pub fn default_model_for_provider(provider: &str) -> &'static str {
     match provider {
         "kimi"       => "moonshot-v1-8k",
         "qwen"       => "qwen-plus",
-        "minimax"    => "abab6.5s-chat",
+        "minimax"    => "MiniMax-M2.7",
         "gpt"        => "gpt-4o-mini",
         "claude"     => "claude-sonnet-4-5",
         "deepseek"   => "deepseek-chat",
@@ -353,7 +362,7 @@ pub fn default_base_url(provider: &str) -> &'static str {
         "anthropic" | "claude"   => "https://api.anthropic.com/v1",
         "kimi"                   => "https://api.moonshot.cn/v1",
         "qwen"                   => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "minimax"                => "https://api.minimax.chat/v1",
+        "minimax"                => "https://api.minimaxi.com/v1",
         "deepseek"               => "https://api.deepseek.com/v1",
         "openrouter"             => "https://openrouter.ai/api/v1",
         _                        => "http://localhost:11434/v1",

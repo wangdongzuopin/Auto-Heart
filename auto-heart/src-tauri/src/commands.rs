@@ -276,6 +276,18 @@ pub fn save_settings(
     Ok(())
 }
 
+/// 保存设置到用户主目录 ~/.autoheart
+#[tauri::command]
+pub fn save_settings_to_home(
+    new_settings: AppSettings,
+    settings: State<'_, SettingsHandle>,
+) -> Result<(), String> {
+    crate::settings::save_settings_to_home_dir(&new_settings)?;
+    let mut s = settings.lock().unwrap();
+    *s = new_settings;
+    Ok(())
+}
+
 // ──────────────────────────────────────────────
 // 日报命令
 // ──────────────────────────────────────────────
@@ -683,9 +695,19 @@ pub async fn send_message(
     }).collect();
 
     // 调用模型
+    let chat_model = if settings_snap.chat_model.is_empty() {
+        &settings_snap.middle_model
+    } else {
+        &settings_snap.chat_model
+    };
+    let chat_model_name = if settings_snap.chat_model_name.is_empty() {
+        &settings_snap.middle_model_name
+    } else {
+        &settings_snap.chat_model_name
+    };
     let model_config = crate::model_router::build_model_config(
-        &settings_snap.chat_model,
-        &settings_snap.chat_model_name,
+        chat_model,
+        chat_model_name,
         &settings_snap,
     ).ok_or("Chat model not configured. Please set chat_model in settings.")?;
 
@@ -739,12 +761,9 @@ fn parse_intent_from_chat(content: &str, settings: &AppSettings, db: &DbPool) ->
         settings,
     )?;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build().ok()?;
-
+    let handle = tokio::runtime::Handle::current();
     let router = crate::model_router::ModelRouter::new();
-    let response = rt.block_on(router.call_with_config(
+    let response = handle.block_on(router.call_with_config(
         &config,
         &prompt,
         Some("你是 Auto-Heart，解析用户任务。只输出 JSON 数组。"),

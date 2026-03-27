@@ -220,6 +220,7 @@ pub fn run() {
             // 设置
             commands::load_settings_cmd,
             commands::save_settings,
+            commands::save_settings_to_home,
             // 日报
             commands::get_today_report,
             commands::get_daily_report,

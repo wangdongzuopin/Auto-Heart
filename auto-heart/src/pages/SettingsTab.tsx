@@ -19,7 +19,7 @@ interface ModelProvider {
 const PROVIDERS: ModelProvider[] = [
   { id: 'kimi',       name: 'Kimi',       color: '#1A73E8', keyField: 'kimiApiKey',       models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], hint: '月之暗面 · 超长上下文' },
   { id: 'qwen',       name: 'Qwen',       color: '#FF6200', keyField: 'qwenApiKey',        models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long'],       hint: '通义千问 · 阿里云' },
-  { id: 'minimax',    name: 'MiniMax',    color: '#6C5CE7', keyField: 'minimaxApiKey',     models: ['abab6.5s-chat', 'abab6.5-chat'],                           hint: 'MiniMax · 低延迟' },
+  { id: 'minimax',    name: 'MiniMax',    color: '#6C5CE7', keyField: 'minimaxApiKey',     models: [],                                                          hint: 'MiniMax · M2.7 新旗舰' },
   { id: 'gpt',        name: 'GPT',        color: '#10A37F', keyField: 'gptApiKey',         models: ['gpt-4o-mini', 'gpt-4o', 'o1-mini', 'gpt-4-turbo'],        hint: 'OpenAI · 通用强模型' },
   { id: 'claude',     name: 'Claude',     color: '#E16B1A', keyField: 'claudeApiKey',      models: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'], hint: 'Anthropic · 长文本' },
   { id: 'deepseek',   name: 'DeepSeek',   color: '#0066FF', keyField: 'deepseekApiKey',    models: ['deepseek-chat', 'deepseek-reasoner'],                      hint: 'DeepSeek · 高性价比' },
@@ -185,7 +185,7 @@ function LayerModelPicker({
           ) : (
             <input
               type="text"
-              placeholder={provider.id === 'ollama' ? 'qwen2.5:7b' : '自定义模型名'}
+              placeholder={provider.id === 'ollama' ? 'qwen2.5:7b' : provider.id === 'minimax' ? 'MiniMax-M2.7 或你的模型名' : '自定义模型名'}
               value={selectedModelName}
               onChange={(e) => onModelNameChange(e.target.value)}
               style={inputStyle}
@@ -202,9 +202,10 @@ function LayerModelPicker({
 // ──────────────────────────────────────────────
 
 export default function SettingsTab() {
-  const { settings, updateSettings, loading } = useSettings();
+  const { settings, updateSettings, saveToHome, loading } = useSettings();
   const [watchPathInput, setWatchPathInput] = useState('');
   const [saved, setSaved] = useState(false);
+  const [savedHome, setSavedHome] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [autostartLoading, setAutostartLoading] = useState(false);
 
@@ -218,6 +219,16 @@ export default function SettingsTab() {
     await updateSettings(patch);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleSaveToHome = async () => {
+    try {
+      await saveToHome();
+      setSavedHome(true);
+      setTimeout(() => setSavedHome(false), 2000);
+    } catch {
+      // error handled in hook
+    }
   };
 
   const toggleAutostart = async () => {
@@ -266,28 +277,31 @@ export default function SettingsTab() {
         </div>
       )}
 
-      {/* ── 模型配置 ── */}
+      {/* ── 模型配置（统一 API Key，中层/深层/对话共用） */}
       <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 10 }}>模型配置</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>模型配置 · 中层/深层/对话共用</div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {savedHome && (
+              <span style={{ fontSize: 10, color: 'var(--color-text-success)' }}>✓ 已保存到本地</span>
+            )}
+            <button
+              onClick={handleSaveToHome}
+              style={{ padding: '5px 12px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'var(--color-brand)', border: 'none', color: '#fff' }}
+            >
+              保存到本地
+            </button>
+          </div>
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <LayerModelPicker
-            label="中层心跳"
-            hint="每10分钟 · 语义理解 · 意图解析"
+            label="模型"
+            hint="中层心跳 · 深层心跳 · 对话模型 共用此配置"
             selectedProvider={settings.middleModel}
             selectedModelName={settings.middleModelName}
             settings={settings}
-            onProviderChange={(p) => handleSave({ middleModel: p, middleModelName: '' })}
-            onModelNameChange={(m) => handleSave({ middleModelName: m })}
-            onKeyChange={(f, v) => handleSave({ [f]: v } as Partial<Settings>)}
-          />
-          <LayerModelPicker
-            label="深层心跳"
-            hint="下班触发 · 日报生成 · 深度分析"
-            selectedProvider={settings.deepModel}
-            selectedModelName={settings.deepModelName}
-            settings={settings}
-            onProviderChange={(p) => handleSave({ deepModel: p, deepModelName: '' })}
-            onModelNameChange={(m) => handleSave({ deepModelName: m })}
+            onProviderChange={(p) => handleSave({ middleModel: p, middleModelName: '', deepModel: p, deepModelName: '', chatModel: p, chatModelName: '' })}
+            onModelNameChange={(m) => handleSave({ middleModelName: m, deepModelName: m, chatModelName: m })}
             onKeyChange={(f, v) => handleSave({ [f]: v } as Partial<Settings>)}
           />
         </div>

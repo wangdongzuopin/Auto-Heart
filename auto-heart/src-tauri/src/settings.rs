@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 ///
 /// 保存路径：{app_data_dir}/settings.json
 /// 文档对齐：技术实现方案 §4 模型路由 + §5 沉默判断
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct AppSettings {
     // ── 基础配置 ──
     /// 自定义数据根目录（空 = 使用默认 app_data_dir）
@@ -53,7 +54,7 @@ pub struct AppSettings {
 }
 
 /// 窗口状态结构体（用于窗口位置/大小记忆）
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WindowState {
     pub x: i32,
     pub y: i32,
@@ -62,40 +63,46 @@ pub struct WindowState {
     pub is_maximized: bool,
 }
 
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            data_dir: String::new(),
-            watch_paths: vec![],
-            silence_mode: "normal".to_string(),
-            offwork_time: "18:00".to_string(),
-            dingtalk_webhook: String::new(),
-            feishu_webhook: String::new(),
-            middle_model: "kimi".to_string(),
-            middle_model_name: String::new(),
-            deep_model: "claude".to_string(),
-            deep_model_name: String::new(),
-            chat_model: "kimi".to_string(),
-            chat_model_name: String::new(),
-            kimi_api_key: String::new(),
-            claude_api_key: String::new(),
-            gpt_api_key: String::new(),
-            qwen_api_key: String::new(),
-            minimax_api_key: String::new(),
-            deepseek_api_key: String::new(),
-            openrouter_api_key: String::new(),
-            ollama_base_url: String::new(),
-            proactive_suggestions: true,
-            critical_keywords: "auth,security,password,token,payment,config,middleware,permission".to_string(),
-            last_window_state: None,
-        }
-    }
-}
-
 /// 线程安全的设置句柄
 pub type SettingsHandle = Arc<Mutex<AppSettings>>;
 
+/// 获取用户主目录下的配置文件路径
+fn home_settings_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let home = std::env::var("USERPROFILE").ok()?;
+    #[cfg(not(target_os = "windows"))]
+    let home = std::env::var("HOME").ok()?;
+
+    Some(PathBuf::from(home).join(".autoheart"))
+}
+
+/// 从用户主目录 ~/.autoheart 加载设置（优先级最高）
+fn load_from_home_dir() -> Option<AppSettings> {
+    let path = home_settings_path()?;
+    if path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(s) = serde_json::from_str::<AppSettings>(&content) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// 将设置保存到用户主目录 ~/.autoheart
+pub fn save_settings_to_home_dir(settings: &AppSettings) -> Result<(), String> {
+    let path = home_settings_path().ok_or("无法获取用户主目录")?;
+    let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+/// 加载设置：优先从 ~/.autoheart 读取，fallback 到 app_data_dir/settings.json
 pub fn load_settings(app_data_dir: &PathBuf) -> AppSettings {
+    // 最高优先级：~/.autoheart
+    if let Some(s) = load_from_home_dir() {
+        return s;
+    }
+    // Fallback：app_data_dir/settings.json
     let path = app_data_dir.join("settings.json");
     if path.exists() {
         if let Ok(content) = std::fs::read_to_string(&path) {

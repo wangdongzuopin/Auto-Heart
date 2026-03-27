@@ -24,6 +24,8 @@ export interface Settings {
   middleModelName: string;
   deepModel: string;
   deepModelName: string;
+  chatModel: string;
+  chatModelName: string;
   // API Keys
   kimiApiKey: string;
   claudeApiKey: string;
@@ -34,6 +36,9 @@ export interface Settings {
   openrouterApiKey: string;
   // Ollama
   ollamaBaseUrl: string;
+  // 主动建议
+  proactiveSuggestions: boolean;
+  criticalKeywords: string;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -48,6 +53,8 @@ const DEFAULT_SETTINGS: Settings = {
   middleModelName: '',
   deepModel: 'claude',
   deepModelName: '',
+  chatModel: 'kimi',
+  chatModelName: '',
   kimiApiKey: '',
   claudeApiKey: '',
   gptApiKey: '',
@@ -56,6 +63,8 @@ const DEFAULT_SETTINGS: Settings = {
   deepseekApiKey: '',
   openrouterApiKey: '',
   ollamaBaseUrl: '',
+  proactiveSuggestions: true,
+  criticalKeywords: 'auth,security,password,token,payment,config,middleware,permission',
 };
 
 function fromRust(raw: Record<string, unknown>): Settings {
@@ -71,6 +80,8 @@ function fromRust(raw: Record<string, unknown>): Settings {
     middleModelName: (raw.middle_model_name as string) ?? '',
     deepModel: (raw.deep_model as string) ?? 'claude',
     deepModelName: (raw.deep_model_name as string) ?? '',
+    chatModel: ((raw.chat_model as string) || (raw.middle_model as string)) ?? 'kimi',
+    chatModelName: ((raw.chat_model_name as string) || (raw.middle_model_name as string)) ?? '',
     kimiApiKey: (raw.kimi_api_key as string) ?? '',
     claudeApiKey: (raw.claude_api_key as string) ?? '',
     gptApiKey: (raw.gpt_api_key as string) ?? '',
@@ -79,6 +90,8 @@ function fromRust(raw: Record<string, unknown>): Settings {
     deepseekApiKey: (raw.deepseek_api_key as string) ?? '',
     openrouterApiKey: (raw.openrouter_api_key as string) ?? '',
     ollamaBaseUrl: (raw.ollama_base_url as string) ?? '',
+    proactiveSuggestions: (raw.proactive_suggestions as boolean) ?? true,
+    criticalKeywords: ((raw.critical_keywords as string) || 'auth,security,password,token,payment,config,middleware,permission') ?? 'auth,security,password,token,payment,config,middleware,permission',
   };
 }
 
@@ -95,6 +108,8 @@ function toRust(s: Settings): Record<string, unknown> {
     middle_model_name: s.middleModelName,
     deep_model: s.deepModel,
     deep_model_name: s.deepModelName,
+    chat_model: s.chatModel,
+    chat_model_name: s.chatModelName,
     kimi_api_key: s.kimiApiKey,
     claude_api_key: s.claudeApiKey,
     gpt_api_key: s.gptApiKey,
@@ -103,6 +118,8 @@ function toRust(s: Settings): Record<string, unknown> {
     deepseek_api_key: s.deepseekApiKey,
     openrouter_api_key: s.openrouterApiKey,
     ollama_base_url: s.ollamaBaseUrl,
+    proactive_suggestions: s.proactiveSuggestions,
+    critical_keywords: s.criticalKeywords,
   };
 }
 
@@ -127,5 +144,15 @@ export function useSettings() {
     }
   }, [settings]);
 
-  return { settings, updateSettings, loading };
+  /// 保存到用户主目录 ~/.autoheart
+  const saveToHome = useCallback(async () => {
+    try {
+      await invokeWithTimeout('save_settings_to_home', { newSettings: toRust(settings) });
+    } catch (err) {
+      console.error('[useSettings] saveToHome failed:', err);
+      throw err;
+    }
+  }, [settings]);
+
+  return { settings, updateSettings, saveToHome, loading };
 }
