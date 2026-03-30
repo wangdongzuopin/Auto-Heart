@@ -1,5 +1,6 @@
 use crate::database::DbPool;
 use crate::settings::{AppSettings, SettingsHandle, WindowState};
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager, State};
@@ -50,6 +51,41 @@ pub struct TodayTask {
     pub task: String,
     pub tag: String,
     pub status: String, // "pending" | "active" | "done"
+}
+
+#[derive(Serialize, Clone)]
+pub struct ActivityCategoryStat {
+    pub category: String,
+    pub count: i32,
+    pub minutes: i32,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ActivitySnapshotEntry {
+    pub app_name: String,
+    pub window_title: String,
+    pub category: String,
+    pub details: String,
+    pub timestamp: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct ActivitySessionStat {
+    pub label: String,
+    pub category: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub minutes: i64,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TodayActivitySummary {
+    pub total_active_minutes: i64,
+    pub total_idle_minutes: i64,
+    pub context_switches: i32,
+    pub categories: Vec<ActivityCategoryStat>,
+    pub sessions: Vec<ActivitySessionStat>,
+    pub snapshots: Vec<ActivitySnapshotEntry>,
 }
 
 // ──────────────────────────────────────────────
@@ -237,6 +273,163 @@ pub fn get_today_intent(db: State<'_, DbPool>) -> Option<serde_json::Value> {
         },
     )
     .ok()
+}
+
+fn parse_db_timestamp(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+#[tauri::command]
+pub fn get_today_activity_summary(db: State<'_, DbPool>) -> TodayActivitySummary {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => {
+            return TodayActivitySummary {
+                total_active_minutes: 0,
+                total_idle_minutes: 0,
+                context_switches: 0,
+                categories: vec![],
+                sessions: vec![],
+                snapshots: vec![],
+            }
+        }
+    };
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let categories = db
+        .prepare(
+            "SELECT category, COUNT(*) AS cnt
+             FROM activity_snapshots
+             WHERE date(timestamp) = ?1
+             GROUP BY category
+             ORDER BY cnt DESC, category ASC
+             LIMIT 6",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today.clone()], |row| {
+                let count: i32 = row.get(1)?;
+                Ok(ActivityCategoryStat {
+                    category: row.get(0)?,
+                    count,
+                    minutes: count * 30,
+                })
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let timeline = db
+        .prepare(
+            "SELECT app_name, window_title, category, details, timestamp
+             FROM activity_snapshots
+             WHERE date(timestamp) = ?1
+             ORDER BY timestamp ASC",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today], |row| {
+                Ok(ActivitySnapshotEntry {
+                    app_name: row.get(0)?,
+                    window_title: row.get(1)?,
+                    category: row.get(2)?,
+                    details: row.get(3)?,
+                    timestamp: row.get(4)?,
+                })
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let mut total_active_minutes = 0_i64;
+    let mut total_idle_minutes = 0_i64;
+    let mut context_switches = 0_i32;
+    let mut sessions: Vec<ActivitySessionStat> = vec![];
+
+    if !timeline.is_empty() {
+        let mut session_start = 0usize;
+
+        for index in 1..timeline.len() {
+            let previous = &timeline[index - 1];
+            let current = &timeline[index];
+            if let (Some(prev_ts), Some(curr_ts)) = (
+                parse_db_timestamp(&previous.timestamp),
+                parse_db_timestamp(&current.timestamp),
+            ) {
+                let gap_minutes = (curr_ts - prev_ts).num_minutes().max(0);
+                if gap_minutes >= 5 {
+                    total_idle_minutes += gap_minutes;
+                } else {
+                    total_active_minutes += gap_minutes.max(1);
+                }
+
+                if previous.app_name != current.app_name || previous.category != current.category {
+                    context_switches += 1;
+                }
+
+                let should_close_session =
+                    gap_minutes >= 5 || previous.app_name != current.app_name || previous.category != current.category;
+
+                if should_close_session {
+                    let start = &timeline[session_start];
+                    let end = previous;
+                    if let (Some(start_ts), Some(end_ts)) = (
+                        parse_db_timestamp(&start.timestamp),
+                        parse_db_timestamp(&end.timestamp),
+                    ) {
+                        let label = if start.window_title.is_empty() {
+                            start.app_name.clone()
+                        } else {
+                            format!("{} · {}", start.app_name, start.window_title)
+                        };
+                        sessions.push(ActivitySessionStat {
+                            label,
+                            category: start.category.clone(),
+                            start_time: start.timestamp[11..16].to_string(),
+                            end_time: end.timestamp[11..16].to_string(),
+                            minutes: (end_ts - start_ts).num_minutes().max(1),
+                        });
+                    }
+                    session_start = index;
+                }
+            }
+        }
+
+        let start = &timeline[session_start];
+        let end = timeline.last().unwrap_or(start);
+        if let (Some(start_ts), Some(end_ts)) = (
+            parse_db_timestamp(&start.timestamp),
+            parse_db_timestamp(&end.timestamp),
+        ) {
+            let label = if start.window_title.is_empty() {
+                start.app_name.clone()
+            } else {
+                format!("{} · {}", start.app_name, start.window_title)
+            };
+            sessions.push(ActivitySessionStat {
+                label,
+                category: start.category.clone(),
+                start_time: start.timestamp[11..16].to_string(),
+                end_time: end.timestamp[11..16].to_string(),
+                minutes: (end_ts - start_ts).num_minutes().max(1),
+            });
+        }
+    }
+
+    sessions.sort_by(|left, right| right.minutes.cmp(&left.minutes));
+    let snapshots = timeline.iter().rev().take(12).cloned().collect::<Vec<_>>();
+
+    TodayActivitySummary {
+        total_active_minutes,
+        total_idle_minutes,
+        context_switches,
+        categories,
+        sessions: sessions.into_iter().take(6).collect(),
+        snapshots,
+    }
 }
 
 /// 手动添加意图（用户在设置中输入）

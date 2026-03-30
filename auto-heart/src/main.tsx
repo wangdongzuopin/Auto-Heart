@@ -24,8 +24,10 @@ if (isOrb) {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
 } else {
-  document.documentElement.style.background = '#0a0a14';
-  document.body.style.background = '#0a0a14';
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const initialBackground = prefersDark ? '#0f172a' : '#f3f7fb';
+  document.documentElement.style.background = initialBackground;
+  document.body.style.background = initialBackground;
 }
 
 function Shell() {

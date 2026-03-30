@@ -37,20 +37,26 @@ struct FileChangeRecord {
     change_type: String,
 }
 
+#[derive(Deserialize)]
+struct ActiveWindowSnapshot {
+    app_name: String,
+    window_title: String,
+}
+
 // ──────────────────────────────────────────────
 // 浅层心跳 — 每 30 秒（本地规则，0 token）
 // ──────────────────────────────────────────────
 
 /// 技术文档 §2.2：感知文件变更、活跃应用、意图文档、行为信号
-pub fn start_shallow_heartbeat(app: AppHandle, db: DbPool, settings: SettingsHandle) {
+pub fn start_shallow_heartbeat(app: AppHandle, db: DbPool, _settings: SettingsHandle) {
     thread::spawn(move || {
         loop {
             thread::sleep(Duration::from_secs(30));
 
             // 1. 活跃应用检测
-            let active_app = get_active_app();
-            if !active_app.is_empty() && active_app != "unknown" {
-                log_active_app(&db, &active_app);
+            let active_window = get_active_window();
+            if !active_window.app_name.is_empty() && active_window.app_name != "unknown" {
+                log_activity_snapshot(&db, &active_window);
             }
 
             // 2. 自然节点检测：若 90 秒内无文件变更，释放 P1 消息
@@ -115,6 +121,183 @@ fn log_active_app(db: &DbPool, app_name: &str) {
 /// 检查意图文档是否更新，读取真实内容写入 DB 等待中层解析
 ///
 /// 技术文档 §3.3：检测新内容 → 写入 intent_history → 等待 LLM 解析
+fn get_active_window() -> ActiveWindowSnapshot {
+    #[cfg(target_os = "windows")]
+    {
+        let output = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"$signature = @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class Win32ForegroundWindow {
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+}
+"@;
+Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null;
+try {
+  $hwnd = [Win32ForegroundWindow]::GetForegroundWindow();
+  if ($hwnd -eq [IntPtr]::Zero) { '{"app_name":"unknown","window_title":""}'; exit 0 }
+  $buffer = New-Object System.Text.StringBuilder 1024;
+  [void][Win32ForegroundWindow]::GetWindowText($hwnd, $buffer, $buffer.Capacity);
+  $pid = 0;
+  [void][Win32ForegroundWindow]::GetWindowThreadProcessId($hwnd, [ref]$pid);
+  $process = Get-Process -Id $pid -ErrorAction SilentlyContinue;
+  [pscustomobject]@{
+    app_name = if ($process) { $process.ProcessName } else { 'unknown' };
+    window_title = $buffer.ToString().Trim();
+  } | ConvertTo-Json -Compress
+} catch {
+  '{"app_name":"unknown","window_title":""}'
+}"#,
+            ])
+            .output();
+        return match output {
+            Ok(o) => serde_json::from_str::<ActiveWindowSnapshot>(
+                String::from_utf8_lossy(&o.stdout).trim(),
+            )
+            .unwrap_or(ActiveWindowSnapshot {
+                app_name: "unknown".to_string(),
+                window_title: String::new(),
+            }),
+            Err(_) => ActiveWindowSnapshot {
+                app_name: "unknown".to_string(),
+                window_title: String::new(),
+            },
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "tell application \"System Events\" to tell (first application process whose frontmost is true) to return name & \"||\" & front window's name",
+            ])
+            .output();
+        return match output {
+            Ok(o) => {
+                let value = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                let mut parts = value.splitn(2, "||");
+                ActiveWindowSnapshot {
+                    app_name: parts.next().unwrap_or("unknown").trim().to_string(),
+                    window_title: parts.next().unwrap_or("").trim().to_string(),
+                }
+            }
+            Err(_) => ActiveWindowSnapshot {
+                app_name: "unknown".to_string(),
+                window_title: String::new(),
+            },
+        };
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        ActiveWindowSnapshot {
+            app_name: "unknown".to_string(),
+            window_title: String::new(),
+        }
+    }
+}
+
+fn classify_activity(app_name: &str, window_title: &str) -> &'static str {
+    let combined = format!("{} {}", app_name.to_lowercase(), window_title.to_lowercase());
+
+    if [
+        "code", "cursor", "idea", "pycharm", "webstorm", "goland", "clion", "rustrover",
+        "terminal", "powershell", "cmd", "git", "node", "python", "cargo",
+    ]
+    .iter()
+    .any(|keyword| combined.contains(keyword))
+    {
+        "开发工作"
+    } else if [
+        "excel", "powerbi", "tableau", "dbeaver", "datagrip", "navicat", "jupyter",
+        "notebook", "rstudio", "mysql", "sqlite",
+    ]
+    .iter()
+    .any(|keyword| combined.contains(keyword))
+    {
+        "数据统计"
+    } else if [
+        "word", "notion", "obsidian", "typora", "xmind", "yuque", "语雀", "飞书文档",
+    ]
+    .iter()
+    .any(|keyword| combined.contains(keyword))
+    {
+        "文档整理"
+    } else if [
+        "wechat", "weixin", "dingtalk", "feishu", "slack", "teams", "zoom", "meeting",
+    ]
+    .iter()
+    .any(|keyword| combined.contains(keyword))
+    {
+        "沟通协作"
+    } else if [
+        "chrome", "msedge", "edge", "firefox", "safari", "github", "docs", "search",
+        "stackoverflow",
+    ]
+    .iter()
+    .any(|keyword| combined.contains(keyword))
+    {
+        "资料检索"
+    } else if ["figma", "photoshop", "illustrator", "canva"].iter().any(|keyword| combined.contains(keyword)) {
+        "设计创作"
+    } else if ["explorer", "finder", "settings", "control panel"].iter().any(|keyword| combined.contains(keyword)) {
+        "系统操作"
+    } else {
+        "其他操作"
+    }
+}
+
+fn log_activity_snapshot(db: &DbPool, snapshot: &ActiveWindowSnapshot) {
+    if let Ok(db) = db.lock() {
+        let category = classify_activity(&snapshot.app_name, &snapshot.window_title);
+        let duplicated: bool = db
+            .query_row(
+                "SELECT COUNT(*) FROM activity_snapshots
+                 WHERE app_name = ?1
+                   AND window_title = ?2
+                   AND category = ?3
+                   AND timestamp > datetime('now', '-45 seconds')",
+                rusqlite::params![snapshot.app_name, snapshot.window_title, category],
+                |row| row.get::<_, i32>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+
+        if duplicated {
+            return;
+        }
+
+        let details = if snapshot.window_title.is_empty() {
+            snapshot.app_name.clone()
+        } else {
+            format!("{} | {}", snapshot.app_name, snapshot.window_title)
+        };
+
+        let _ = db.execute(
+            "INSERT INTO activity_snapshots (app_name, window_title, category, source, details)
+             VALUES (?1, ?2, ?3, 'foreground', ?4)",
+            rusqlite::params![snapshot.app_name, snapshot.window_title, category, details],
+        );
+
+        let _ = db.execute(
+            "INSERT INTO decision_log (id, description, reason, related_file, context) \
+             VALUES (?1, 'active_app_log', ?2, '', datetime('now'))",
+            rusqlite::params![
+                Uuid::new_v4().to_string(),
+                format!("active:{} [{}]", snapshot.app_name, category)
+            ],
+        );
+    }
+}
+
 fn check_intent_doc_update(db: &DbPool, path: &str) {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
@@ -534,7 +717,7 @@ pub fn start_deep_heartbeat(app: AppHandle, db: DbPool, settings: SettingsHandle
             let _ = app.emit("heartbeat:deep", ());
             eprintln!("[deep] 触发深层心跳，开始生成日报...");
 
-            if let Some(report) = generate_daily_report(&db, &settings_snap, &today) {
+            if let Some(report) = generate_daily_report_v2(&db, &settings_snap, &today) {
                 save_daily_report(&db, &today, &report);
                 let _ = app.emit(
                     "daily_report:ready",
@@ -640,6 +823,96 @@ fn generate_daily_report(db: &DbPool, settings: &crate::settings::AppSettings, d
 }
 
 /// 保存日报到 DB
+fn generate_daily_report_v2(
+    db: &DbPool,
+    settings: &crate::settings::AppSettings,
+    date: &str,
+) -> Option<String> {
+    let file_changes = {
+        let db = db.lock().ok()?;
+        let mut stmt = db
+            .prepare("SELECT DISTINCT file_path FROM file_changes WHERE date(timestamp) = ?1 LIMIT 20")
+            .ok()?;
+        let rows = stmt.query_map(rusqlite::params![date], |row| row.get::<_, String>(0))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect::<Vec<_>>();
+        rows
+    };
+
+    let semantic_updates = {
+        let db = db.lock().ok()?;
+        let mut stmt = db
+            .prepare("SELECT module_name, understanding FROM semantic_modules WHERE date(updated_at) = ?1")
+            .ok()?;
+        let rows = stmt.query_map(rusqlite::params![date], |row| {
+            Ok(format!(
+                "{}: {}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?
+            ))
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+        rows
+    };
+
+    let activity_summary = {
+        let db = db.lock().ok()?;
+        let mut stmt = db
+            .prepare(
+                "SELECT category, COUNT(*) AS cnt
+                 FROM activity_snapshots
+                 WHERE date(timestamp) = ?1
+                 GROUP BY category
+                 ORDER BY cnt DESC, category ASC
+                 LIMIT 6",
+            )
+            .ok()?;
+        let rows = stmt.query_map(rusqlite::params![date], |row| {
+            let count: i32 = row.get(1)?;
+            Ok(format!("{}: 约{}分钟", row.get::<_, String>(0)?, count * 30))
+        })
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect::<Vec<_>>();
+        rows
+    };
+
+    if file_changes.is_empty() && semantic_updates.is_empty() && activity_summary.is_empty() {
+        return None;
+    }
+
+    let prompt = format!(
+        "今天是 {}。\n\n涉及文件：\n{}\n\n语义理解：\n{}\n\n电脑上的工作活动：\n{}\n\n请生成一份有业务意义的工作日报（200字以内）。\n要求：\n- 结合开发、数据、文档、沟通等活动，总结今天真实完成的工作\n- 体现业务价值，而不是简单罗列文件名\n- 指出明日值得继续推进或关注的事项",
+        date,
+        if file_changes.is_empty() { "暂无文件变更".to_string() } else { file_changes.join("\n") },
+        if semantic_updates.is_empty() { "暂无语义更新".to_string() } else { semantic_updates.join("\n") },
+        if activity_summary.is_empty() { "暂无前台活动快照".to_string() } else { activity_summary.join("\n") }
+    );
+
+    let config = crate::model_router::build_model_config(
+        &settings.deep_model,
+        &settings.deep_model_name,
+        settings,
+    )?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+
+    let router = ModelRouter::new();
+
+    rt.block_on(router.call_with_config(
+        &config,
+        &prompt,
+        Some("你是 Auto-Heart，一名理解开发者全天工作上下文的 AI 助理。请输出简洁、业务导向、可直接发送的中文日报。"),
+    ))
+    .ok()
+}
+
 fn save_daily_report(db: &DbPool, date: &str, content: &str) {
     if let Ok(db) = db.lock() {
         let id = Uuid::new_v4().to_string();

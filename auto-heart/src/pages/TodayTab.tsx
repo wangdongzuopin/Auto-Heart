@@ -4,7 +4,6 @@ import { listen } from '@tauri-apps/api/event';
 import { useMessageQueue } from '../hooks/useMessageQueue';
 import { useSettings } from '../hooks/useSettings';
 
-/** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
 async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
@@ -26,57 +25,134 @@ interface ReportData {
   status: 'draft' | 'confirmed' | 'sent';
 }
 
+interface ActivityCategoryStat {
+  category: string;
+  count: number;
+  minutes: number;
+}
+
+interface ActivitySnapshotEntry {
+  app_name: string;
+  window_title: string;
+  category: string;
+  details: string;
+  timestamp: string;
+}
+
+interface ActivitySessionStat {
+  label: string;
+  category: string;
+  start_time: string;
+  end_time: string;
+  minutes: number;
+}
+
+interface TodayActivitySummary {
+  total_active_minutes: number;
+  total_idle_minutes: number;
+  context_switches: number;
+  categories: ActivityCategoryStat[];
+  sessions: ActivitySessionStat[];
+  snapshots: ActivitySnapshotEntry[];
+}
+
+const cardStyle: React.CSSProperties = {
+  background: 'var(--color-background-secondary)',
+  borderRadius: 'var(--border-radius-lg)',
+  border: '0.5px solid var(--color-border-tertiary)',
+  padding: 14,
+};
 
 export default function TodayTab() {
   const [tasks, setTasks] = useState<TodayTask[]>([]);
   const [intent, setIntent] = useState<{ raw_text: string; parsed: boolean } | null>(null);
   const [report, setReport] = useState<ReportData | null>(null);
+  const [activitySummary, setActivitySummary] = useState<TodayActivitySummary>({
+    total_active_minutes: 0,
+    total_idle_minutes: 0,
+    context_switches: 0,
+    categories: [],
+    sessions: [],
+    snapshots: [],
+  });
   const [editingReport, setEditingReport] = useState(false);
   const [editContent, setEditContent] = useState('');
-  const [sending, setSending] = useState<string | null>(null); // 'dingtalk' | 'feishu'
+  const [sending, setSending] = useState<string | null>(null);
   const [sendResult, setSendResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const { messages, dismiss, ack } = useMessageQueue();
   const { settings } = useSettings();
 
   const loadTasks = useCallback(async () => {
     try {
-      const list = await invokeWithTimeout<TodayTask[]>('get_today_tasks');
-      setTasks(list);
+      setTasks(await invokeWithTimeout<TodayTask[]>('get_today_tasks'));
     } catch {
-      // 网络或数据库错误，保持空状态
+      setTasks([]);
     }
   }, []);
 
   const loadIntent = useCallback(async () => {
     try {
-      const rec = await invokeWithTimeout<{ raw_text: string; parsed: boolean } | null>('get_today_intent');
-      setIntent(rec);
-    } catch { setIntent(null); }
+      setIntent(await invokeWithTimeout<{ raw_text: string; parsed: boolean } | null>('get_today_intent'));
+    } catch {
+      setIntent(null);
+    }
   }, []);
 
   const loadReport = useCallback(async () => {
     try {
-      const r = await invokeWithTimeout<ReportData | null>('get_today_report');
-      setReport(r);
-      if (r) setEditContent(r.content);
-    } catch { setReport(null); }
+      const nextReport = await invokeWithTimeout<ReportData | null>('get_today_report');
+      setReport(nextReport);
+      if (nextReport) setEditContent(nextReport.content);
+    } catch {
+      setReport(null);
+    }
+  }, []);
+
+  const loadActivitySummary = useCallback(async () => {
+    try {
+      setActivitySummary(await invokeWithTimeout<TodayActivitySummary>('get_today_activity_summary'));
+    } catch {
+      setActivitySummary({
+        total_active_minutes: 0,
+        total_idle_minutes: 0,
+        context_switches: 0,
+        categories: [],
+        sessions: [],
+        snapshots: [],
+      });
+    }
   }, []);
 
   useEffect(() => {
-    loadTasks(); loadIntent(); loadReport();
+    loadTasks();
+    loadIntent();
+    loadReport();
+    loadActivitySummary();
 
     let unlistenParsed: (() => void) | undefined;
     let unlistenReport: (() => void) | undefined;
     let unlistenShallow: (() => void) | undefined;
 
     const setup = async () => {
-      unlistenParsed = await listen('intent:parsed', () => { loadTasks(); loadIntent(); });
+      unlistenParsed = await listen('intent:parsed', () => {
+        loadTasks();
+        loadIntent();
+        loadActivitySummary();
+      });
       unlistenReport = await listen('daily_report:ready', () => loadReport());
-      unlistenShallow = await listen('heartbeat:shallow', () => loadIntent());
+      unlistenShallow = await listen('heartbeat:shallow', () => {
+        loadIntent();
+        loadActivitySummary();
+      });
     };
+
     setup();
-    return () => { unlistenParsed?.(); unlistenReport?.(); unlistenShallow?.(); };
-  }, [loadTasks, loadIntent, loadReport]);
+    return () => {
+      unlistenParsed?.();
+      unlistenReport?.();
+      unlistenShallow?.();
+    };
+  }, [loadTasks, loadIntent, loadReport, loadActivitySummary]);
 
   const saveEdit = async () => {
     if (!report) return;
@@ -84,7 +160,9 @@ export default function TodayTab() {
       await invokeWithTimeout('update_report_content', { date: report.date, content: editContent });
       setEditingReport(false);
       loadReport();
-    } catch (e) { console.error(e); }
+    } catch (error) {
+      console.error(error);
+    }
   };
 
   const sendReport = async (channel: 'dingtalk' | 'feishu') => {
@@ -93,10 +171,10 @@ export default function TodayTab() {
     setSendResult(null);
     try {
       await invokeWithTimeout('send_daily_report', { date: report.date, channel });
-      setSendResult({ ok: true, msg: channel === 'dingtalk' ? '已发送到钉钉 ✓' : '已发送到飞书 ✓' });
+      setSendResult({ ok: true, msg: channel === 'dingtalk' ? '已发送到钉钉' : '已发送到飞书' });
       loadReport();
-    } catch (e) {
-      setSendResult({ ok: false, msg: String(e) });
+    } catch (error) {
+      setSendResult({ ok: false, msg: String(error) });
     } finally {
       setSending(null);
       setTimeout(() => setSendResult(null), 4000);
@@ -108,139 +186,220 @@ export default function TodayTab() {
 
   return (
     <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-
-      {/* 今日意图原文 */}
       {intent && (
-        <div>
-          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-            今日意图
-            <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 4, background: intent.parsed ? 'rgba(76,175,80,0.1)' : 'var(--color-brand-light)', color: intent.parsed ? 'var(--color-text-success)' : 'var(--color-brand)', border: intent.parsed ? 'none' : '0.5px solid var(--color-brand-ring)' }}>
-              {intent.parsed ? '已解析' : '等待中层心跳解析...'}
+        <section style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>今日意图</div>
+            <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: intent.parsed ? 'rgba(47,133,90,0.12)' : 'var(--color-brand-light)', color: intent.parsed ? 'var(--color-text-success)' : 'var(--color-brand)' }}>
+              {intent.parsed ? '已解析' : '待解析'}
             </span>
           </div>
-          <div style={{ background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)', padding: '10px 12px', fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.8, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
             {intent.raw_text}
           </div>
-        </div>
+        </section>
       )}
 
-      {/* 任务列表 */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>
-          今日任务
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-          {tasks.map((t, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px', background: t.status === 'active' ? 'var(--color-brand-light)' : t.status === 'done' ? 'transparent' : 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)', border: t.status === 'active' ? '0.5px solid var(--color-brand-ring)' : '0.5px solid transparent', opacity: t.status === 'done' ? 0.45 : 1, transition: 'all 0.15s' }}>
-              <span style={{ fontSize: 11, fontWeight: 500, color: t.time ? 'var(--color-brand)' : 'var(--color-text-tertiary)', minWidth: 36 }}>{t.time || '--'}</span>
-              <span style={{ fontSize: 12, color: t.status === 'active' ? 'var(--color-brand-dark)' : 'var(--color-text-primary)', flex: 1, textDecoration: t.status === 'done' ? 'line-through' : 'none' }}>{t.task}</span>
-              {t.tag && <span style={{ fontSize: 10, color: t.status === 'active' ? 'var(--color-brand-muted)' : 'var(--color-text-tertiary)', background: 'var(--color-background-tertiary)', padding: '1px 6px', borderRadius: 4 }}>{t.tag}</span>}
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 8 }}>今日任务</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {tasks.length === 0 && (
+            <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', textAlign: 'center', padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+              暂无解析出的任务
+            </div>
+          )}
+          {tasks.map((task, index) => (
+            <div key={index} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', background: task.status === 'active' ? 'var(--color-brand-light)' : 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)', border: task.status === 'active' ? '0.5px solid var(--color-brand-ring)' : '0.5px solid transparent', opacity: task.status === 'done' ? 0.55 : 1 }}>
+              <span style={{ minWidth: 42, fontSize: 11, color: task.time ? 'var(--color-brand)' : 'var(--color-text-tertiary)', fontWeight: 600 }}>
+                {task.time || '--'}
+              </span>
+              <span style={{ flex: 1, fontSize: 12, color: 'var(--color-text-primary)', textDecoration: task.status === 'done' ? 'line-through' : 'none' }}>
+                {task.task}
+              </span>
+              {task.tag && (
+                <span style={{ fontSize: 10, color: 'var(--color-text-tertiary)', background: 'rgba(255,255,255,0.12)', padding: '2px 6px', borderRadius: 999 }}>
+                  {task.tag}
+                </span>
+              )}
             </div>
           ))}
         </div>
-      </div>
+      </section>
 
-      {/* 消息队列 */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-          等待发送的消息
-          {messages.length > 0 && <span style={{ fontSize: 9, background: 'var(--color-brand)', color: '#fff', padding: '1px 5px', borderRadius: 8 }}>{messages.length}</span>}
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)', marginBottom: 8 }}>今日电脑活动</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8, marginBottom: 10 }}>
+          <div style={{ padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>活跃时长</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>{activitySummary.total_active_minutes} 分钟</div>
+          </div>
+          <div style={{ padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>空闲时长</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>{activitySummary.total_idle_minutes} 分钟</div>
+          </div>
+          <div style={{ padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>切换次数</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>{activitySummary.context_switches} 次</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+          {activitySummary.categories.map((item) => (
+            <div key={item.category} style={{ padding: '7px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)', border: '0.5px solid var(--color-border-primary)' }}>
+              <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{item.category}</div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-primary)', fontWeight: 600 }}>{item.minutes} 分钟</div>
+            </div>
+          ))}
+        </div>
+        {activitySummary.snapshots.length === 0 ? (
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', textAlign: 'center', padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+            暂无前台活动快照
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {activitySummary.sessions.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>连续工作段</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {activitySummary.sessions.map((session, index) => (
+                    <div key={`${session.start_time}-${index}`} style={{ padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)', border: '0.5px solid var(--color-border-primary)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                        <span style={{ fontSize: 10, color: 'var(--color-brand)' }}>{session.category}</span>
+                        <span style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{session.start_time} - {session.end_time}</span>
+                        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--color-text-secondary)' }}>{session.minutes} 分钟</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--color-text-primary)', wordBreak: 'break-word' }}>{session.label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>最近活动</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {activitySummary.snapshots.map((item, index) => (
+              <div key={`${item.timestamp}-${index}`} style={{ padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--color-brand)' }}>{item.category}</span>
+                  <span style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{item.timestamp.slice(11, 16)}</span>
+                </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>{item.app_name}</div>
+                {item.window_title && (
+                  <div style={{ fontSize: 11, color: 'var(--color-text-secondary)', marginTop: 2, wordBreak: 'break-word' }}>
+                    {item.window_title}
+                  </div>
+                )}
+              </div>
+            ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>待发送消息</div>
+          {messages.length > 0 && (
+            <span style={{ fontSize: 10, background: 'var(--color-brand)', color: '#fff', padding: '2px 7px', borderRadius: 999 }}>
+              {messages.length}
+            </span>
+          )}
         </div>
         {messages.length === 0 ? (
-          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', padding: '8px 10px', background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)', textAlign: 'center' }}>暂无待发送消息</div>
+          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', textAlign: 'center', padding: '8px 10px', background: 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+            暂无待处理消息
+          </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            {messages.map((m) => (
-              <div key={m.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', background: m.priority === 0 ? 'rgba(255,80,80,0.08)' : m.priority === 1 ? 'var(--color-background-warning)' : 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)' }}>
-                <div style={{ width: 5, height: 5, borderRadius: '50%', marginTop: 4, background: m.priority === 0 ? '#ff5050' : m.priority === 1 ? 'var(--color-text-warning)' : 'var(--color-border-secondary)', flexShrink: 0 }} />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 11, fontWeight: 500, color: m.priority <= 1 ? 'var(--color-text-warning)' : 'var(--color-text-secondary)', marginBottom: 2 }}>{m.title}</div>
-                  <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', lineHeight: 1.4 }}>{m.content}</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {messages.map((message) => (
+              <div key={message.id} style={{ padding: '8px 10px', background: message.priority === 0 ? 'rgba(255,80,80,0.08)' : 'var(--color-background-tertiary)', borderRadius: 'var(--border-radius-md)' }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: message.priority <= 1 ? 'var(--color-text-warning)' : 'var(--color-text-primary)', marginBottom: 3 }}>
+                  {message.title}
                 </div>
-                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  <span style={{ fontSize: 10, color: 'var(--color-brand)', background: 'var(--color-brand-light)', padding: '2px 6px', borderRadius: 4, cursor: 'pointer', border: '0.5px solid var(--color-brand-ring)' }} onClick={() => ack(m.id)}>帮我改</span>
-                  <span style={{ fontSize: 10, color: 'var(--color-text-tertiary)', background: 'var(--color-background-tertiary)', padding: '2px 6px', borderRadius: 4, cursor: 'pointer' }} onClick={() => dismiss(m.id)}>忽略</span>
+                <div style={{ fontSize: 11, color: 'var(--color-text-secondary)', lineHeight: 1.6, marginBottom: 8 }}>
+                  {message.content}
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button onClick={() => ack(message.id)} style={{ padding: '5px 10px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-brand-ring)', background: 'var(--color-brand-light)', color: 'var(--color-brand)', cursor: 'pointer' }}>
+                    帮我改
+                  </button>
+                  <button onClick={() => dismiss(message.id)} style={{ padding: '5px 10px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-border-primary)', background: 'transparent', color: 'var(--color-text-tertiary)', cursor: 'pointer' }}>
+                    忽略
+                  </button>
                 </div>
               </div>
             ))}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* 日报区块 */}
       {report && (
-        <div style={{ background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-lg)', padding: 14, border: report.status === 'sent' ? '0.5px solid rgba(76,175,80,0.3)' : '0.5px solid var(--color-brand-ring)' }}>
-          {/* 日报标题栏 */}
+        <section style={{ ...cardStyle, border: report.status === 'sent' ? '0.5px solid rgba(47,133,90,0.3)' : '0.5px solid var(--color-brand-ring)' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-primary)' }}>今日日报</span>
-              <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 4, background: report.status === 'sent' ? 'rgba(76,175,80,0.15)' : report.status === 'confirmed' ? 'var(--color-brand-light)' : 'rgba(255,176,32,0.12)', color: report.status === 'sent' ? 'var(--color-text-success)' : report.status === 'confirmed' ? 'var(--color-brand)' : 'var(--color-text-warning)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>今日日报</div>
+              <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 999, background: report.status === 'sent' ? 'rgba(47,133,90,0.12)' : report.status === 'confirmed' ? 'var(--color-brand-light)' : 'rgba(255,176,32,0.12)', color: report.status === 'sent' ? 'var(--color-text-success)' : report.status === 'confirmed' ? 'var(--color-brand)' : 'var(--color-text-warning)' }}>
                 {report.status === 'sent' ? '已发送' : report.status === 'confirmed' ? '已确认' : '草稿'}
               </span>
             </div>
             {report.status !== 'sent' && !editingReport && (
-              <span style={{ fontSize: 10, color: 'var(--color-brand)', cursor: 'pointer' }} onClick={() => { setEditingReport(true); setEditContent(report.content); }}>编辑</span>
+              <button onClick={() => { setEditingReport(true); setEditContent(report.content); }} style={{ padding: '4px 10px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-border-primary)', background: 'transparent', color: 'var(--color-text-secondary)', cursor: 'pointer' }}>
+                编辑
+              </button>
             )}
           </div>
 
-          {/* 日报内容 / 编辑器 */}
           {editingReport ? (
             <div>
               <textarea
                 value={editContent}
-                onChange={(e) => setEditContent(e.target.value)}
+                onChange={(event) => setEditContent(event.target.value)}
                 rows={8}
-                style={{ width: '100%', padding: '8px 10px', fontSize: 12, background: 'var(--color-background-tertiary)', border: '0.5px solid var(--color-brand-ring)', borderRadius: 6, color: 'var(--color-text-primary)', resize: 'vertical', outline: 'none', lineHeight: 1.6, boxSizing: 'border-box' }}
+                style={{ width: '100%', boxSizing: 'border-box', padding: '10px 12px', fontSize: 12, lineHeight: 1.7, color: 'var(--color-text-primary)', background: 'var(--color-background-tertiary)', border: '0.5px solid var(--color-brand-ring)', borderRadius: 8, resize: 'vertical', outline: 'none' }}
               />
-              <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                <button onClick={saveEdit} style={{ flex: 1, padding: '6px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'var(--color-brand)', border: 'none', color: '#fff' }}>保存修改</button>
-                <button onClick={() => setEditingReport(false)} style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'transparent', border: '0.5px solid var(--color-border-primary)', color: 'var(--color-text-tertiary)' }}>取消</button>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button onClick={saveEdit} style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, border: 'none', background: 'var(--color-brand)', color: '#fff', cursor: 'pointer' }}>
+                  保存修改
+                </button>
+                <button onClick={() => setEditingReport(false)} style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-border-primary)', background: 'transparent', color: 'var(--color-text-tertiary)', cursor: 'pointer' }}>
+                  取消
+                </button>
               </div>
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+            <div style={{ fontSize: 12, color: 'var(--color-text-secondary)', lineHeight: 1.75, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
               {report.content}
             </div>
           )}
 
-          {/* 发送按钮组 */}
           {report.status !== 'sent' && !editingReport && (hasDingtalk || hasFeishu) && (
-            <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {hasDingtalk && (
-                <button
-                  onClick={() => sendReport('dingtalk')}
-                  disabled={!!sending}
-                  style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, cursor: sending ? 'default' : 'pointer', background: sending === 'dingtalk' ? 'var(--color-background-tertiary)' : 'var(--color-brand-light)', border: '0.5px solid var(--color-brand-ring)', color: 'var(--color-brand)', opacity: sending && sending !== 'dingtalk' ? 0.5 : 1, transition: 'all 0.15s' }}
-                >
+                <button onClick={() => sendReport('dingtalk')} disabled={!!sending} style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-brand-ring)', background: 'var(--color-brand-light)', color: 'var(--color-brand)', cursor: sending ? 'default' : 'pointer', opacity: sending && sending !== 'dingtalk' ? 0.5 : 1 }}>
                   {sending === 'dingtalk' ? '发送中...' : '发到钉钉'}
                 </button>
               )}
               {hasFeishu && (
-                <button
-                  onClick={() => sendReport('feishu')}
-                  disabled={!!sending}
-                  style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, cursor: sending ? 'default' : 'pointer', background: sending === 'feishu' ? 'var(--color-background-tertiary)' : 'var(--color-brand-light)', border: '0.5px solid var(--color-brand-ring)', color: 'var(--color-brand)', opacity: sending && sending !== 'feishu' ? 0.5 : 1, transition: 'all 0.15s' }}
-                >
+                <button onClick={() => sendReport('feishu')} disabled={!!sending} style={{ padding: '6px 12px', fontSize: 11, borderRadius: 6, border: '0.5px solid var(--color-brand-ring)', background: 'var(--color-brand-light)', color: 'var(--color-brand)', cursor: sending ? 'default' : 'pointer', opacity: sending && sending !== 'feishu' ? 0.5 : 1 }}>
                   {sending === 'feishu' ? '发送中...' : '发到飞书'}
                 </button>
               )}
             </div>
           )}
 
-          {/* 发送结果提示 */}
           {sendResult && (
-            <div style={{ marginTop: 8, fontSize: 11, color: sendResult.ok ? 'var(--color-text-success)' : '#ff5050', padding: '4px 8px', background: sendResult.ok ? 'rgba(76,175,80,0.1)' : 'rgba(255,80,80,0.08)', borderRadius: 4 }}>
+            <div style={{ marginTop: 8, padding: '6px 8px', borderRadius: 6, fontSize: 11, color: sendResult.ok ? 'var(--color-text-success)' : '#e53e3e', background: sendResult.ok ? 'rgba(47,133,90,0.1)' : 'rgba(229,62,62,0.08)' }}>
               {sendResult.msg}
             </div>
           )}
 
-          {/* 未配置 Webhook 提示 */}
           {report.status !== 'sent' && !hasDingtalk && !hasFeishu && (
-            <div style={{ marginTop: 10, fontSize: 10, color: 'var(--color-text-tertiary)', textAlign: 'center' }}>
-              在「设置」中配置钉钉/飞书 Webhook 后可一键发送
+            <div style={{ marginTop: 10, fontSize: 10, color: 'var(--color-text-tertiary)' }}>
+              在设置里配置钉钉或飞书 Webhook 后，可以一键发送日报。
             </div>
           )}
-        </div>
+        </section>
       )}
     </div>
   );

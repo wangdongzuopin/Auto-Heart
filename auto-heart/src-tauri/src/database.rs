@@ -113,11 +113,23 @@ fn create_tables(conn: &Connection) -> Result<()> {
         );
 
         -- 索引
+        CREATE TABLE IF NOT EXISTS activity_snapshots (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_name      TEXT NOT NULL,
+            window_title  TEXT NOT NULL DEFAULT '',
+            category      TEXT NOT NULL DEFAULT 'other',
+            source        TEXT NOT NULL DEFAULT 'foreground',
+            details       TEXT NOT NULL DEFAULT '',
+            timestamp     TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_file_changes_time ON file_changes(timestamp);
         CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status, priority);
         CREATE INDEX IF NOT EXISTS idx_intent_history_date ON intent_history(created_at);
         CREATE INDEX IF NOT EXISTS idx_operation_log_time ON operation_log(timestamp);
         CREATE INDEX IF NOT EXISTS idx_operation_log_chunk ON operation_log(chunk_id);
+        CREATE INDEX IF NOT EXISTS idx_activity_snapshots_time ON activity_snapshots(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_activity_snapshots_category ON activity_snapshots(category, timestamp);
         ",
     )?;
 

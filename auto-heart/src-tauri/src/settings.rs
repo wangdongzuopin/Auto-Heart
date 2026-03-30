@@ -48,6 +48,7 @@ pub struct AppSettings {
     // ── 主动建议 ──
     pub proactive_suggestions: bool,
     pub critical_keywords: String,
+    pub theme_mode: String,
 
     // ── 窗口状态 ──
     pub last_window_state: Option<WindowState>,

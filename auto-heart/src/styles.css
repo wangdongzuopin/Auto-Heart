@@ -1,47 +1,23 @@
 /* ============================================
-   Auto-Heart 设计系统 · Design Tokens
+   Auto-Heart Design Tokens
    ============================================ */
 
 :root {
-  /* --- 字体 --- */
-  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-
-  /* --- 色彩 · 深色主题 --- */
-  --color-background-primary: #0a0a14;
-  --color-background-secondary: #12121e;
-  --color-background-tertiary: #1a1a2e;
-  --color-background-warning: rgba(255, 176, 32, 0.1);
-
-  /* 品牌色 */
-  --color-brand: #534AB7;
-  --color-brand-light: #EEEDFE;
-  --color-brand-ring: #AFA9EC;
-  --color-brand-dark: #3C3489;
-  --color-brand-muted: #7F77DD;
-
-  /* 文字 */
-  --color-text-primary: #eeeeee;
-  --color-text-secondary: #999999;
-  --color-text-tertiary: #666666;
-  --color-text-success: #4CAF50;
-  --color-text-warning: #FFB020;
-
-  /* 边框 */
-  --color-border-primary: #333333;
-  --color-border-secondary: #444444;
-  --color-border-tertiary: #222222;
-
-  /* 圆角 */
+  --font-sans: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --color-brand: #2b6cb0;
+  --color-brand-light: #e8f1fb;
+  --color-brand-ring: #9fc2eb;
+  --color-brand-dark: #1f4e85;
+  --color-brand-muted: #5b88bc;
+  --color-text-success: #2f855a;
+  --color-text-warning: #b7791f;
   --border-radius-sm: 5px;
   --border-radius-md: 7px;
   --border-radius-lg: 12px;
   --border-radius-xl: 16px;
-
-  /* --- 基础重置 --- */
   font-family: var(--font-sans);
   line-height: 1.5;
   font-weight: 400;
-  color-scheme: dark;
   color: var(--color-text-primary);
   background-color: var(--color-background-primary);
   font-synthesis: none;
@@ -50,12 +26,47 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ============================================
-   Orb 动画关键帧（匹配 prototype 规范）
-   ============================================ */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --color-background-primary: #f3f7fb;
+  --color-background-secondary: rgba(255, 255, 255, 0.88);
+  --color-background-tertiary: #e7eef7;
+  --color-background-warning: rgba(255, 176, 32, 0.12);
+  --color-text-primary: #17324d;
+  --color-text-secondary: #4d647c;
+  --color-text-tertiary: #7e92a8;
+  --color-border-primary: #c7d6e6;
+  --color-border-secondary: #d5e1ee;
+  --color-border-tertiary: #e2ebf5;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --color-background-primary: #0f172a;
+  --color-background-secondary: rgba(15, 23, 42, 0.88);
+  --color-background-tertiary: #162033;
+  --color-background-warning: rgba(255, 176, 32, 0.1);
+  --color-text-primary: #eef4ff;
+  --color-text-secondary: #a6b7cb;
+  --color-text-tertiary: #6f8298;
+  --color-border-primary: #314155;
+  --color-border-secondary: #405268;
+  --color-border-tertiary: #1d2939;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  background: var(--color-background-primary);
+  color: var(--color-text-primary);
+}
 
 @keyframes breathe {
-  0%, 100% {
+  0%,
+  100% {
     transform: scale(1);
     opacity: 0.55;
   }
@@ -77,7 +88,8 @@
 }
 
 @keyframes thinking {
-  0%, 100% {
+  0%,
+  100% {
     transform: scale(1) rotate(0deg);
     opacity: 0.6;
   }
@@ -111,17 +123,19 @@
 }
 
 @keyframes glow-pulse {
-  0%, 100% {
-    box-shadow: 0 0 8px rgba(175, 169, 236, 0.3);
+  0%,
+  100% {
+    box-shadow: 0 0 8px rgba(159, 194, 235, 0.25);
   }
   50% {
-    box-shadow: 0 0 20px rgba(175, 169, 236, 0.6);
+    box-shadow: 0 0 20px rgba(159, 194, 235, 0.55);
   }
 }
 
-/* 尊重用户减少动画偏好 */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

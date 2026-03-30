@@ -6,6 +6,7 @@ import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { isTauriRuntime } from './tauriRuntime';
 import Orb from './components/Orb';
 import SpeechBubble from './components/SpeechBubble';
+import { useResolvedTheme } from './hooks/useResolvedTheme';
 import './App.css';
 
 const POS_KEY = 'auto-heart:orb-pos-v3';
@@ -23,6 +24,7 @@ interface IncomingMessage {
 type BubbleType = 'message' | 'report' | 'agent';
 
 function App() {
+  useResolvedTheme();
   const [orbState, setOrbState] = useState<'idle' | 'thinking' | 'speaking'>('idle');
   const isDraggingRef = useRef(false);
   const [bubbleMessage, setBubbleMessage] = useState<{

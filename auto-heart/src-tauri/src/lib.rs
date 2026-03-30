@@ -176,7 +176,7 @@ pub fn run() {
             start_operation_log_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
 
             // ── 文件监听（有配置时启动）──
-            let mut all_paths = watch_paths;
+            let all_paths = watch_paths;
             if !all_paths.is_empty() {
                 start_file_watcher(db.clone(), all_paths);
             }
@@ -216,6 +216,7 @@ pub fn run() {
             // 今日任务 + 意图
             commands::get_today_tasks,
             commands::get_today_intent,
+            commands::get_today_activity_summary,
             commands::add_intent,
             // 设置
             commands::load_settings_cmd,

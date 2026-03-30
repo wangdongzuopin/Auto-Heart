@@ -39,6 +39,7 @@ export interface Settings {
   // 主动建议
   proactiveSuggestions: boolean;
   criticalKeywords: string;
+  themeMode: 'system' | 'light' | 'dark';
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -65,6 +66,7 @@ const DEFAULT_SETTINGS: Settings = {
   ollamaBaseUrl: '',
   proactiveSuggestions: true,
   criticalKeywords: 'auth,security,password,token,payment,config,middleware,permission',
+  themeMode: 'system',
 };
 
 function fromRust(raw: Record<string, unknown>): Settings {
@@ -92,6 +94,7 @@ function fromRust(raw: Record<string, unknown>): Settings {
     ollamaBaseUrl: (raw.ollama_base_url as string) ?? '',
     proactiveSuggestions: (raw.proactive_suggestions as boolean) ?? true,
     criticalKeywords: ((raw.critical_keywords as string) || 'auth,security,password,token,payment,config,middleware,permission') ?? 'auth,security,password,token,payment,config,middleware,permission',
+    themeMode: ((raw.theme_mode as string) ?? 'system') as Settings['themeMode'],
   };
 }
 
@@ -120,6 +123,7 @@ function toRust(s: Settings): Record<string, unknown> {
     ollama_base_url: s.ollamaBaseUrl,
     proactive_suggestions: s.proactiveSuggestions,
     critical_keywords: s.criticalKeywords,
+    theme_mode: s.themeMode,
   };
 }
 
