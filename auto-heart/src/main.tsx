@@ -18,16 +18,20 @@ function viewFromUrl(): 'orb' | 'main' | '' {
 
 // 模块加载时同步解析（这个阶段 window.location.search 已可用）
 const isOrb = viewFromUrl() === 'orb';
+document.documentElement.dataset.view = isOrb ? 'orb' : 'main';
+document.body.dataset.view = isOrb ? 'orb' : 'main';
 
 // 在任何 React 代码执行前同步设置背景
 if (isOrb) {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
+  document.getElementById('root')?.style.setProperty('background', 'transparent');
 } else {
   const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
   const initialBackground = prefersDark ? '#0f172a' : '#f3f7fb';
   document.documentElement.style.background = initialBackground;
   document.body.style.background = initialBackground;
+  document.getElementById('root')?.style.setProperty('background', initialBackground);
 }
 
 function Shell() {

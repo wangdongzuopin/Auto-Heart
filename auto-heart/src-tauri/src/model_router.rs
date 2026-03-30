@@ -20,7 +20,7 @@ pub struct ModelConfig {
     pub model: String,
     pub api_key: String,
     pub base_url: String,
-    pub chat_endpoint: String, // e.g. "/v1/chat/completions" or "/v1/text/chatcompletion_v2"
+    pub chat_endpoint: String, // e.g. "/chat/completions" or "/text/chatcompletion_v2"
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +71,21 @@ struct AnthropicResponse {
 #[derive(Debug, Deserialize)]
 struct AnthropicContent {
     text: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicMessagesRequest {
+    model: String,
+    max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    messages: Vec<AnthropicMessage>,
 }
 
 /// 路由策略
@@ -259,7 +274,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.kimi_api_key.clone(),
                 base_url: default_base_url("kimi").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/chat/completions".to_string(),
             })
         }
         "qwen" => {
@@ -269,7 +284,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.qwen_api_key.clone(),
                 base_url: default_base_url("qwen").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/chat/completions".to_string(),
             })
         }
         "minimax" => {
@@ -279,7 +294,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.minimax_api_key.clone(),
                 base_url: default_base_url("minimax").to_string(),
-                chat_endpoint: "/v1/text/chatcompletion_v2".to_string(),
+                chat_endpoint: "/text/chatcompletion_v2".to_string(),
             })
         }
         "gpt" => {
@@ -289,7 +304,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.gpt_api_key.clone(),
                 base_url: default_base_url("openai").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/chat/completions".to_string(),
             })
         }
         "claude" => {
@@ -299,7 +314,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.claude_api_key.clone(),
                 base_url: default_base_url("anthropic").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/messages".to_string(),
             })
         }
         "deepseek" => {
@@ -309,7 +324,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.deepseek_api_key.clone(),
                 base_url: default_base_url("deepseek").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/chat/completions".to_string(),
             })
         }
         "openrouter" => {
@@ -319,7 +334,7 @@ pub fn build_model_config(
                 model: effective_model,
                 api_key: settings.openrouter_api_key.clone(),
                 base_url: default_base_url("openrouter").to_string(),
-                chat_endpoint: "/v1/chat/completions".to_string(),
+                chat_endpoint: "/chat/completions".to_string(),
             })
         }
         "ollama" => {
@@ -374,6 +389,10 @@ pub async fn call_chat_model_with_messages(
     config: &ModelConfig,
     messages: &[OaiMessage],
 ) -> Result<String, String> {
+    if config.provider == "claude" {
+        return call_anthropic_with_messages(config, messages).await;
+    }
+
     let request = OaiRequest {
         model: config.model.clone(),
         messages: messages.to_vec(),
@@ -381,7 +400,11 @@ pub async fn call_chat_model_with_messages(
         temperature: Some(0.7),
     };
 
-    let url = format!("{}/chat/completions", config.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}{}",
+        config.base_url.trim_end_matches('/'),
+        config.chat_endpoint
+    );
 
     let client = reqwest::Client::new();
     let mut req = client
@@ -409,4 +432,69 @@ pub async fn call_chat_model_with_messages(
     resp.choices.first()
         .map(|c| c.message.content.clone())
         .ok_or_else(|| "No response from model".into())
+}
+
+async fn call_anthropic_with_messages(
+    config: &ModelConfig,
+    messages: &[OaiMessage],
+) -> Result<String, String> {
+    let mut system_parts = Vec::new();
+    let mut chat_messages = Vec::new();
+
+    for message in messages {
+        if message.role == "system" {
+            system_parts.push(message.content.clone());
+        } else {
+            chat_messages.push(AnthropicMessage {
+                role: message.role.clone(),
+                content: message.content.clone(),
+            });
+        }
+    }
+
+    if chat_messages.is_empty() {
+        chat_messages.push(AnthropicMessage {
+            role: "user".to_string(),
+            content: "你好".to_string(),
+        });
+    }
+
+    let request = AnthropicMessagesRequest {
+        model: config.model.clone(),
+        max_tokens: 2000,
+        system: if system_parts.is_empty() {
+            None
+        } else {
+            Some(system_parts.join("\n\n"))
+        },
+        messages: chat_messages,
+    };
+
+    let url = format!("{}/messages", config.base_url.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&url)
+        .header("x-api-key", &config.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Anthropic API error {}: {}", status, body));
+    }
+
+    let resp: AnthropicResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Parse Anthropic response: {}", e))?;
+
+    resp.content
+        .first()
+        .map(|c| c.text.clone())
+        .ok_or_else(|| "No content in Claude response".into())
 }

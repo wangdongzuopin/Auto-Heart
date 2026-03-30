@@ -79,7 +79,7 @@ fn get_active_app() -> String {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "try { (Get-Process | Where-Object {$_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne ''} | Sort-Object CPU -Descending | Select-Object -First 1).ProcessName } catch { '' }",
+                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; try { (Get-Process | Where-Object {$_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -ne ''} | Sort-Object CPU -Descending | Select-Object -First 1).ProcessName } catch { '' }",
             ])
             .output();
         match output {
@@ -133,21 +133,23 @@ fn get_active_window() -> ActiveWindowSnapshot {
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class Win32ForegroundWindow {
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-}
-"@;
-Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null;
-try {
-  $hwnd = [Win32ForegroundWindow]::GetForegroundWindow();
-  if ($hwnd -eq [IntPtr]::Zero) { '{"app_name":"unknown","window_title":""}'; exit 0 }
+  public static class Win32ForegroundWindow {
+      [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+      [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+      [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  }
+  "@;
+  Add-Type -TypeDefinition $signature -ErrorAction SilentlyContinue | Out-Null;
+  [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);
+  $OutputEncoding = [Console]::OutputEncoding;
+  try {
+    $hwnd = [Win32ForegroundWindow]::GetForegroundWindow();
+    if ($hwnd -eq [IntPtr]::Zero) { '{"app_name":"unknown","window_title":""}'; exit 0 }
   $buffer = New-Object System.Text.StringBuilder 1024;
   [void][Win32ForegroundWindow]::GetWindowText($hwnd, $buffer, $buffer.Capacity);
-  $pid = 0;
-  [void][Win32ForegroundWindow]::GetWindowThreadProcessId($hwnd, [ref]$pid);
-  $process = Get-Process -Id $pid -ErrorAction SilentlyContinue;
+    [uint32]$targetPid = 0;
+    [void][Win32ForegroundWindow]::GetWindowThreadProcessId($hwnd, [ref]$targetPid);
+    $process = Get-Process -Id $targetPid -ErrorAction SilentlyContinue;
   [pscustomobject]@{
     app_name = if ($process) { $process.ProcessName } else { 'unknown' };
     window_title = $buffer.ToString().Trim();

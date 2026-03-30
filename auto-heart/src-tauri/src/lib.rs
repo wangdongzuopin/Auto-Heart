@@ -217,6 +217,8 @@ pub fn run() {
             commands::get_today_tasks,
             commands::get_today_intent,
             commands::get_today_activity_summary,
+            commands::clear_today_activity_snapshots,
+            commands::get_tracking_health,
             commands::add_intent,
             // 设置
             commands::load_settings_cmd,

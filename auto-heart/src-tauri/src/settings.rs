@@ -127,19 +127,47 @@ pub fn auto_detect_watch_paths() -> Vec<String> {
 
     #[cfg(target_os = "windows")]
     {
+        let mut candidate_paths: Vec<PathBuf> = Vec::new();
+
         if let Ok(user_dir) = std::env::var("USERPROFILE") {
             let base = PathBuf::from(&user_dir);
-            // 常见开发目录
-            for name in &["Documents", "Desktop", "Code", "Projects"] {
-                let path = base.join(name);
-                if path.exists() {
-                    paths.push(path.to_string_lossy().to_string());
-                }
+            for name in &["Documents", "Desktop", "Code", "Projects", "dev", "workspace", "work"] {
+                candidate_paths.push(base.join(name));
             }
-            // 也检查用户主目录本身（有些人在 ~/dev 下开发）
-            let home_dev = base.join("dev");
-            if home_dev.exists() {
-                paths.push(home_dev.to_string_lossy().to_string());
+        }
+
+        for drive in 'C'..='Z' {
+            let drive_root = PathBuf::from(format!("{}:\\", drive));
+            if !drive_root.exists() {
+                continue;
+            }
+
+            for name in &[
+                "Code",
+                "Projects",
+                "Project",
+                "company",
+                "Company",
+                "Agent",
+                "Workspace",
+                "workspace",
+                "Work",
+                "work",
+                "dev",
+                "Dev",
+                "Repos",
+                "repos",
+            ] {
+                candidate_paths.push(drive_root.join(name));
+            }
+        }
+
+        candidate_paths.sort();
+        candidate_paths.dedup();
+
+        for path in candidate_paths {
+            if path.exists() {
+                paths.push(path.to_string_lossy().to_string());
             }
         }
     }

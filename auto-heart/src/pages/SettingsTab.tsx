@@ -1,11 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
-import { useSettings, Settings } from '../hooks/useSettings';
+import { Settings, useSettings } from '../hooks/useSettings';
 
-// ──────────────────────────────────────────────
-// 模型配置注册表
-// ──────────────────────────────────────────────
+async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000),
+  );
+  return Promise.race([invoke<T>(cmd, args), timeout]) as Promise<T>;
+}
 
 interface ModelProvider {
   id: string;
@@ -16,15 +19,35 @@ interface ModelProvider {
   hint: string;
 }
 
+interface GitCommitEntry {
+  repo_path: string;
+  short_hash: string;
+  summary: string;
+  committed_at: string;
+}
+
+interface TrackingHealth {
+  current_db_path: string;
+  watch_paths: string[];
+  repo_paths: string[];
+  today_activity_snapshots: number;
+  today_file_changes: number;
+  today_operation_logs: number;
+  today_git_commits: number;
+  latest_activity_at: string | null;
+  latest_file_change_at: string | null;
+  latest_git_commit: GitCommitEntry | null;
+}
+
 const PROVIDERS: ModelProvider[] = [
-  { id: 'kimi',       name: 'Kimi',       color: '#1A73E8', keyField: 'kimiApiKey',       models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], hint: '月之暗面 · 超长上下文' },
-  { id: 'qwen',       name: 'Qwen',       color: '#FF6200', keyField: 'qwenApiKey',        models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long'],       hint: '通义千问 · 阿里云' },
-  { id: 'minimax',    name: 'MiniMax',    color: '#6C5CE7', keyField: 'minimaxApiKey',     models: [],                                                          hint: 'MiniMax · M2.7 新旗舰' },
-  { id: 'gpt',        name: 'GPT',        color: '#10A37F', keyField: 'gptApiKey',         models: ['gpt-4o-mini', 'gpt-4o', 'o1-mini', 'gpt-4-turbo'],        hint: 'OpenAI · 通用强模型' },
-  { id: 'claude',     name: 'Claude',     color: '#E16B1A', keyField: 'claudeApiKey',      models: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'], hint: 'Anthropic · 长文本' },
-  { id: 'deepseek',   name: 'DeepSeek',   color: '#0066FF', keyField: 'deepseekApiKey',    models: ['deepseek-chat', 'deepseek-reasoner'],                      hint: 'DeepSeek · 高性价比' },
-  { id: 'openrouter', name: 'OpenRouter', color: '#8B5CF6', keyField: 'openrouterApiKey',  models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-5', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-chat'], hint: '统一代理 · 100+ 模型' },
-  { id: 'ollama',     name: '本地',        color: '#555',    keyField: null,                models: [],                                                          hint: 'Ollama · 完全离线' },
+  { id: 'kimi', name: 'Kimi', color: '#1A73E8', keyField: 'kimiApiKey', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'], hint: '适合长上下文总结和通用办公。' },
+  { id: 'qwen', name: 'Qwen', color: '#FF6200', keyField: 'qwenApiKey', models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long'], hint: '响应快，适合综合日常场景。' },
+  { id: 'minimax', name: 'MiniMax', color: '#6C5CE7', keyField: 'minimaxApiKey', models: [], hint: '助手型体验不错，适合对话。' },
+  { id: 'gpt', name: 'GPT', color: '#10A37F', keyField: 'gptApiKey', models: ['gpt-4o-mini', 'gpt-4o', 'o1-mini', 'gpt-4-turbo'], hint: 'OpenAI 通用模型，稳定性好。' },
+  { id: 'claude', name: 'Claude', color: '#E16B1A', keyField: 'claudeApiKey', models: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'], hint: '文档理解和长文本表达更稳。' },
+  { id: 'deepseek', name: 'DeepSeek', color: '#0066FF', keyField: 'deepseekApiKey', models: ['deepseek-chat', 'deepseek-reasoner'], hint: '代码和推理兼顾。' },
+  { id: 'openrouter', name: 'OpenRouter', color: '#8B5CF6', keyField: 'openrouterApiKey', models: ['openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-5', 'google/gemini-2.0-flash-001', 'deepseek/deepseek-chat'], hint: '方便切换多个供应商。' },
+  { id: 'ollama', name: '本地', color: '#555555', keyField: null, models: [], hint: '离线运行，本地模型可用。' },
 ];
 
 const KEY_LABELS: Partial<Record<keyof Settings, string>> = {
@@ -47,11 +70,55 @@ const KEY_PLACEHOLDERS: Partial<Record<keyof Settings, string>> = {
   openrouterApiKey: 'sk-or-...',
 };
 
-// ──────────────────────────────────────────────
-// 单层模型配置组件
-// ──────────────────────────────────────────────
+const cardStyle: React.CSSProperties = {
+  background: 'var(--color-background-secondary)',
+  borderRadius: 'var(--border-radius-lg)',
+  border: '0.5px solid var(--color-border-tertiary)',
+  padding: 14,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 10,
+};
 
-interface LayerModelPickerProps {
+const inputStyle: React.CSSProperties = {
+  width: '100%',
+  padding: '8px 10px',
+  fontSize: 12,
+  background: 'var(--color-background-tertiary)',
+  border: '0.5px solid var(--color-border-primary)',
+  borderRadius: 6,
+  color: 'var(--color-text-primary)',
+  boxSizing: 'border-box',
+  outline: 'none',
+};
+
+function StatCard({ label, value, detail }: { label: string; value: string | number; detail?: string }) {
+  return (
+    <div
+      style={{
+        padding: '10px 12px',
+        background: 'var(--color-background-tertiary)',
+        borderRadius: 'var(--border-radius-md)',
+        border: '0.5px solid var(--color-border-primary)',
+      }}
+    >
+      <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{label}</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-text-primary)' }}>{value}</div>
+      {detail ? <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>{detail}</div> : null}
+    </div>
+  );
+}
+
+function LayerModelPicker({
+  label,
+  hint,
+  selectedProvider,
+  selectedModelName,
+  settings,
+  onProviderChange,
+  onModelNameChange,
+  onKeyChange,
+}: {
   label: string;
   hint: string;
   selectedProvider: string;
@@ -60,146 +127,145 @@ interface LayerModelPickerProps {
   onProviderChange: (provider: string) => void;
   onModelNameChange: (name: string) => void;
   onKeyChange: (keyField: keyof Settings, value: string) => void;
-}
-
-function LayerModelPicker({
-  label, hint,
-  selectedProvider, selectedModelName,
-  settings,
-  onProviderChange, onModelNameChange, onKeyChange,
-}: LayerModelPickerProps) {
-  const provider = PROVIDERS.find(p => p.id === selectedProvider) ?? PROVIDERS[0];
+}) {
+  const provider = PROVIDERS.find((item) => item.id === selectedProvider) ?? PROVIDERS[0];
   const keyField = provider.keyField;
   const currentKey = keyField ? (settings[keyField] as string) : '';
   const isConfigured = provider.id === 'ollama' || !!currentKey;
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '7px 10px', fontSize: 12,
-    background: 'var(--color-background-tertiary)',
-    border: '0.5px solid var(--color-border-primary)',
-    borderRadius: 6, color: 'var(--color-text-primary)',
-    outline: 'none', boxSizing: 'border-box', transition: 'border-color 0.15s',
-  };
-
   return (
-    <div style={{ background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-lg)', padding: 14 }}>
-      {/* 标题 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-text-primary)' }}>{label}</span>
-        <span style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{hint}</span>
-        {isConfigured && (
-          <span style={{ marginLeft: 'auto', fontSize: 9, color: 'var(--color-text-success)', background: 'rgba(76,175,80,0.12)', padding: '1px 6px', borderRadius: 4 }}>已配置</span>
-        )}
+    <section style={cardStyle}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>{label}</div>
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{hint}</div>
+        {isConfigured ? (
+          <div
+            style={{
+              marginLeft: 'auto',
+              padding: '2px 8px',
+              borderRadius: 999,
+              fontSize: 10,
+              color: 'var(--color-text-success)',
+              background: 'rgba(76,175,80,0.12)',
+            }}
+          >
+            已配置
+          </div>
+        ) : null}
       </div>
 
-      {/* 提供商卡片行 */}
-      <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap', marginBottom: 12 }}>
-        {PROVIDERS.map(p => {
-          const pKey = p.keyField ? (settings[p.keyField] as string) : 'ok';
-          const pConfigured = p.id === 'ollama' || !!pKey;
-          const selected = p.id === selectedProvider;
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {PROVIDERS.map((item) => {
+          const configured = item.id === 'ollama' || !!(item.keyField ? settings[item.keyField] : 'ok');
+          const selected = item.id === selectedProvider;
           return (
             <button
-              key={p.id}
-              onClick={() => onProviderChange(p.id)}
+              key={item.id}
+              onClick={() => onProviderChange(item.id)}
               style={{
-                padding: '5px 10px', fontSize: 11, borderRadius: 6, cursor: 'pointer',
-                border: selected ? `1px solid ${p.color}` : '0.5px solid var(--color-border-primary)',
-                background: selected ? `${p.color}18` : 'transparent',
-                color: selected ? p.color : 'var(--color-text-tertiary)',
-                transition: 'all 0.15s', position: 'relative',
+                position: 'relative',
+                padding: '6px 10px',
+                borderRadius: 8,
+                border: selected ? `1px solid ${item.color}` : '0.5px solid var(--color-border-primary)',
+                background: selected ? `${item.color}18` : 'transparent',
+                color: selected ? item.color : 'var(--color-text-secondary)',
+                fontSize: 11,
+                cursor: 'pointer',
               }}
             >
-              {p.name}
-              {pConfigured && (
-                <span style={{
-                  position: 'absolute', top: -3, right: -3,
-                  width: 6, height: 6, borderRadius: '50%',
-                  background: 'var(--color-text-success)',
-                  border: '1px solid var(--color-background-secondary)',
-                }} />
-              )}
+              {item.name}
+              {configured ? (
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: -3,
+                    right: -3,
+                    width: 7,
+                    height: 7,
+                    borderRadius: '50%',
+                    background: 'var(--color-text-success)',
+                    border: '1px solid var(--color-background-secondary)',
+                  }}
+                />
+              ) : null}
             </button>
           );
         })}
       </div>
 
-      {/* 选中提供商的配置面板 */}
-      <div style={{ background: 'var(--color-background-tertiary)', borderRadius: 8, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ fontSize: 10, color: provider.color, marginBottom: 2, fontWeight: 500 }}>
-          {provider.hint}
-        </div>
+      <div
+        style={{
+          background: 'var(--color-background-tertiary)',
+          borderRadius: 10,
+          padding: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}
+      >
+        <div style={{ fontSize: 10, color: provider.color, fontWeight: 600 }}>{provider.hint}</div>
 
-        {/* API Key 输入（Ollama 除外）*/}
-        {keyField && (
+        {keyField ? (
           <div>
-            <label style={{ fontSize: 10, color: 'var(--color-text-tertiary)', display: 'block', marginBottom: 3 }}>
+            <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
               {KEY_LABELS[keyField] ?? 'API Key'}
             </label>
             <input
               type="password"
               placeholder={KEY_PLACEHOLDERS[keyField] ?? 'sk-...'}
               value={currentKey}
-              onChange={(e) => onKeyChange(keyField, e.target.value)}
-              onBlur={(e) => onKeyChange(keyField, e.target.value)}
+              onChange={(event) => onKeyChange(keyField, event.target.value)}
+              onBlur={(event) => onKeyChange(keyField, event.target.value)}
               style={inputStyle}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = provider.color; }}
             />
           </div>
-        )}
-
-        {/* Ollama：Base URL */}
-        {provider.id === 'ollama' && (
+        ) : (
           <div>
-            <label style={{ fontSize: 10, color: 'var(--color-text-tertiary)', display: 'block', marginBottom: 3 }}>
+            <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
               Ollama 服务地址
             </label>
             <input
               type="text"
               placeholder="http://localhost:11434"
               value={settings.ollamaBaseUrl}
-              onChange={(e) => onKeyChange('ollamaBaseUrl', e.target.value)}
+              onChange={(event) => onKeyChange('ollamaBaseUrl', event.target.value)}
+              onBlur={(event) => onKeyChange('ollamaBaseUrl', event.target.value)}
               style={inputStyle}
             />
           </div>
         )}
 
-        {/* 模型版本选择 */}
         <div>
-          <label style={{ fontSize: 10, color: 'var(--color-text-tertiary)', display: 'block', marginBottom: 3 }}>
-            模型版本
+          <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
+            模型名称
           </label>
           {provider.models.length > 0 ? (
             <select
               value={selectedModelName || provider.models[0]}
-              onChange={(e) => onModelNameChange(e.target.value)}
-              style={{ ...inputStyle, cursor: 'pointer', appearance: 'none',
-                backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23666'/%3E%3C/svg%3E")`,
-                backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: 28,
-              }}
+              onChange={(event) => onModelNameChange(event.target.value)}
+              style={{ ...inputStyle, cursor: 'pointer' }}
             >
-              {provider.models.map(m => (
-                <option key={m} value={m}>{m}</option>
+              {provider.models.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
               ))}
             </select>
           ) : (
             <input
               type="text"
-              placeholder={provider.id === 'ollama' ? 'qwen2.5:7b' : provider.id === 'minimax' ? 'MiniMax-M2.7 或你的模型名' : '自定义模型名'}
+              placeholder={provider.id === 'ollama' ? 'qwen2.5:7b' : '输入实际模型名'}
               value={selectedModelName}
-              onChange={(e) => onModelNameChange(e.target.value)}
+              onChange={(event) => onModelNameChange(event.target.value)}
+              onBlur={(event) => onModelNameChange(event.target.value)}
               style={inputStyle}
             />
           )}
         </div>
       </div>
-    </div>
+    </section>
   );
 }
-
-// ──────────────────────────────────────────────
-// 主页面
-// ──────────────────────────────────────────────
 
 export default function SettingsTab() {
   const { settings, updateSettings, saveToHome, loading } = useSettings();
@@ -208,26 +274,49 @@ export default function SettingsTab() {
   const [savedHome, setSavedHome] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [autostartLoading, setAutostartLoading] = useState(false);
+  const [trackingHealth, setTrackingHealth] = useState<TrackingHealth | null>(null);
+  const [trackingHealthLoading, setTrackingHealthLoading] = useState(false);
+
+  const loadTrackingHealth = useCallback(async () => {
+    setTrackingHealthLoading(true);
+    try {
+      const nextHealth = await invokeWithTimeout<TrackingHealth>('get_tracking_health');
+      setTrackingHealth(nextHealth);
+    } catch (error) {
+      console.error('[Settings] load tracking health failed:', error);
+      setTrackingHealth(null);
+    } finally {
+      setTrackingHealthLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     invoke<boolean>('plugin:autostart|is_enabled')
-      .then((v) => setAutostartEnabled(v))
+      .then((value) => setAutostartEnabled(value))
       .catch(() => {});
-  }, []);
+    loadTrackingHealth();
+  }, [loadTrackingHealth]);
 
-  const handleSave = async (patch: Partial<Settings>) => {
-    await updateSettings(patch);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
-  };
+  const handleSave = useCallback(
+    async (patch: Partial<Settings>) => {
+      await updateSettings(patch);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+      setTimeout(() => {
+        loadTrackingHealth();
+      }, 150);
+    },
+    [loadTrackingHealth, updateSettings],
+  );
 
   const handleSaveToHome = async () => {
     try {
       await saveToHome();
       setSavedHome(true);
       setTimeout(() => setSavedHome(false), 2000);
+      loadTrackingHealth();
     } catch {
-      // error handled in hook
+      // noop
     }
   };
 
@@ -241,27 +330,24 @@ export default function SettingsTab() {
         await invoke('plugin:autostart|enable');
         setAutostartEnabled(true);
       }
-    } catch (e) { console.error(e); }
-    setAutostartLoading(false);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setAutostartLoading(false);
+    }
   };
 
   const addWatchPath = () => {
     const trimmed = watchPathInput.trim();
-    if (!trimmed || settings.watchPaths.includes(trimmed)) return;
+    if (!trimmed || settings.watchPaths.includes(trimmed)) {
+      return;
+    }
     handleSave({ watchPaths: [...settings.watchPaths, trimmed] });
     setWatchPathInput('');
   };
 
   const removeWatchPath = (path: string) => {
-    handleSave({ watchPaths: settings.watchPaths.filter((p) => p !== path) });
-  };
-
-  const inputStyle: React.CSSProperties = {
-    width: '100%', padding: '8px 10px', fontSize: 12,
-    background: 'var(--color-background-tertiary)',
-    border: '0.5px solid var(--color-border-primary)',
-    borderRadius: 6, color: 'var(--color-text-primary)',
-    boxSizing: 'border-box', outline: 'none', transition: 'border-color 0.15s',
+    handleSave({ watchPaths: settings.watchPaths.filter((item) => item !== path) });
   };
 
   if (loading) {
@@ -269,181 +355,342 @@ export default function SettingsTab() {
   }
 
   return (
-    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 20 }}>
-
-      {saved && (
-        <div style={{ fontSize: 11, color: 'var(--color-text-success)', background: 'rgba(76,175,80,0.1)', padding: '6px 10px', borderRadius: 6, textAlign: 'center' }}>
-          ✓ 设置已保存
+    <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {saved ? (
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--color-text-success)',
+            background: 'rgba(76,175,80,0.1)',
+            padding: '6px 10px',
+            borderRadius: 8,
+            textAlign: 'center',
+          }}
+        >
+          设置已保存
         </div>
-      )}
+      ) : null}
 
-      {/* ── 模型配置（统一 API Key，中层/深层/对话共用） */}
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>模型配置 · 中层/深层/对话共用</div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {savedHome && (
-              <span style={{ fontSize: 10, color: 'var(--color-text-success)' }}>✓ 已保存到本地</span>
-            )}
-            <button
-              onClick={handleSaveToHome}
-              style={{ padding: '5px 12px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'var(--color-brand)', border: 'none', color: '#fff' }}
-            >
-              保存到本地
-            </button>
+      <section style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>监听健康检查</div>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 2 }}>
+              用来确认今天是否真的抓到了前台活动、文件改动和 Git 提交。
+            </div>
+          </div>
+          <button
+            onClick={loadTrackingHealth}
+            disabled={trackingHealthLoading}
+            style={{
+              padding: '6px 10px',
+              fontSize: 11,
+              borderRadius: 8,
+              cursor: trackingHealthLoading ? 'default' : 'pointer',
+              border: '0.5px solid var(--color-border-primary)',
+              background: 'transparent',
+              color: 'var(--color-text-secondary)',
+              opacity: trackingHealthLoading ? 0.6 : 1,
+            }}
+          >
+            {trackingHealthLoading ? '刷新中...' : '刷新'}
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 8 }}>
+          <StatCard label="前台快照" value={trackingHealth?.today_activity_snapshots ?? 0} />
+          <StatCard label="文件变更" value={trackingHealth?.today_file_changes ?? 0} />
+          <StatCard label="操作日志" value={trackingHealth?.today_operation_logs ?? 0} />
+          <StatCard label="Git 提交" value={trackingHealth?.today_git_commits ?? 0} />
+        </div>
+
+        <div
+          style={{
+            padding: '10px 12px',
+            background: 'var(--color-background-tertiary)',
+            borderRadius: 'var(--border-radius-md)',
+            border: '0.5px solid var(--color-border-primary)',
+          }}
+        >
+          <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>当前数据库</div>
+          <div style={{ fontSize: 11, color: 'var(--color-text-primary)', wordBreak: 'break-all' }}>
+            {trackingHealth?.current_db_path || '暂无'}
           </div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <LayerModelPicker
-            label="模型"
-            hint="中层心跳 · 深层心跳 · 对话模型 共用此配置"
-            selectedProvider={settings.middleModel}
-            selectedModelName={settings.middleModelName}
-            settings={settings}
-            onProviderChange={(p) => handleSave({ middleModel: p, middleModelName: '', deepModel: p, deepModelName: '', chatModel: p, chatModelName: '' })}
-            onModelNameChange={(m) => handleSave({ middleModelName: m, deepModelName: m, chatModelName: m })}
-            onKeyChange={(f, v) => handleSave({ [f]: v } as Partial<Settings>)}
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+          <div
+            style={{
+              padding: '10px 12px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+              border: '0.5px solid var(--color-border-primary)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>监听目录</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {(trackingHealth?.watch_paths ?? []).slice(0, 6).map((path) => (
+                <div key={path} style={{ fontSize: 11, color: 'var(--color-text-secondary)', wordBreak: 'break-all' }}>
+                  {path}
+                </div>
+              ))}
+              {(trackingHealth?.watch_paths ?? []).length === 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>当前没有监听目录</div>
+              ) : null}
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: '10px 12px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+              border: '0.5px solid var(--color-border-primary)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>识别到的 Git 仓库</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {(trackingHealth?.repo_paths ?? []).slice(0, 6).map((path) => (
+                <div key={path} style={{ fontSize: 11, color: 'var(--color-text-secondary)', wordBreak: 'break-all' }}>
+                  {path}
+                </div>
+              ))}
+              {(trackingHealth?.repo_paths ?? []).length === 0 ? (
+                <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>监听目录下还没有发现 Git 仓库</div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+          <StatCard label="最近活动快照" value={trackingHealth?.latest_activity_at?.slice(11, 16) ?? '暂无'} />
+          <StatCard label="最近文件变更" value={trackingHealth?.latest_file_change_at?.slice(11, 16) ?? '暂无'} />
+          <StatCard
+            label="最近 Git 提交"
+            value={trackingHealth?.latest_git_commit ? trackingHealth.latest_git_commit.short_hash : '暂无'}
+            detail={trackingHealth?.latest_git_commit?.summary}
           />
+        </div>
+      </section>
+
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>模型配置会同时作用于中层、深层和对话。</div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {savedHome ? <span style={{ fontSize: 10, color: 'var(--color-text-success)' }}>已保存到本地配置</span> : null}
+          <button
+            onClick={handleSaveToHome}
+            style={{
+              padding: '6px 12px',
+              fontSize: 11,
+              borderRadius: 8,
+              cursor: 'pointer',
+              background: 'var(--color-brand)',
+              border: 'none',
+              color: '#fff',
+            }}
+          >
+            保存到本地
+          </button>
         </div>
       </div>
 
-      {/* ── 意图文档路径 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>意图文档路径</div>
+      <LayerModelPicker
+        label="统一模型"
+        hint="中层心跳、深层心跳、对话共用"
+        selectedProvider={settings.middleModel}
+        selectedModelName={settings.middleModelName}
+        settings={settings}
+        onProviderChange={(provider) =>
+          handleSave({
+            middleModel: provider,
+            middleModelName: '',
+            deepModel: provider,
+            deepModelName: '',
+            chatModel: provider,
+            chatModelName: '',
+          })
+        }
+        onModelNameChange={(name) =>
+          handleSave({
+            middleModelName: name,
+            deepModelName: name,
+            chatModelName: name,
+          })
+        }
+        onKeyChange={(field, value) => handleSave({ [field]: value } as Partial<Settings>)}
+      />
+
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>意图文档路径</div>
         <input
           type="text"
           placeholder="支持 Notion / Obsidian / 本地 txt 路径"
           value={settings.intentDocPath}
-          onChange={(e) => updateSettings({ intentDocPath: e.target.value })}
-          onBlur={(e) => handleSave({ intentDocPath: e.target.value })}
+          onChange={(event) => updateSettings({ intentDocPath: event.target.value })}
+          onBlur={(event) => handleSave({ intentDocPath: event.target.value })}
           style={inputStyle}
-          onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#534AB7'; }}
         />
-        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
-          Auto-Heart 会监听此文件，解析你的工作计划
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>
+          这个文档会作为工作计划的补充来源，帮助日报理解上下文。
         </div>
-      </div>
+      </section>
 
-      {/* ── 感知范围 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>感知范围 · 项目目录</div>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>感知范围</div>
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>
+          建议把常用项目目录都加进来，这样文件监听和 Git 汇总才会更完整。
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
           <input
             type="text"
-            placeholder="添加项目路径，如 D:/projects/my-app"
+            placeholder="添加项目路径，比如 D:/company 或 D:/Agent"
             value={watchPathInput}
-            onChange={(e) => setWatchPathInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addWatchPath()}
+            onChange={(event) => setWatchPathInput(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && addWatchPath()}
             style={{ ...inputStyle, flex: 1 }}
-            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#534AB7'; }}
-            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = '#333'; }}
           />
           <button
             onClick={addWatchPath}
-            style={{ padding: '8px 14px', fontSize: 12, borderRadius: 6, cursor: 'pointer', background: 'var(--color-brand-light)', border: '0.5px solid var(--color-brand-ring)', color: 'var(--color-brand)' }}
-          >添加</button>
+            style={{
+              padding: '8px 14px',
+              fontSize: 12,
+              borderRadius: 8,
+              cursor: 'pointer',
+              background: 'var(--color-brand-light)',
+              border: '0.5px solid var(--color-brand-ring)',
+              color: 'var(--color-brand)',
+            }}
+          >
+            添加
+          </button>
         </div>
-        {settings.watchPaths.length === 0 ? (
-          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', textAlign: 'center', padding: '10px', background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)' }}>
-            尚未添加监听目录
-          </div>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {settings.watchPaths.map((p) => (
-              <div key={p} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)' }}>
-                <span style={{ fontSize: 11, color: 'var(--color-text-secondary)', flex: 1, wordBreak: 'break-all' }}>{p}</span>
-                <span onClick={() => removeWatchPath(p)} style={{ fontSize: 11, color: 'var(--color-text-tertiary)', cursor: 'pointer', padding: '1px 6px', borderRadius: 3 }}
-                  onMouseEnter={(e) => { (e.target as HTMLElement).style.color = '#ff5050'; }}
-                  onMouseLeave={(e) => { (e.target as HTMLElement).style.color = '#666'; }}>✕</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
 
-      {/* ── 沉默阈值 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>沉默阈值</div>
-        <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {settings.watchPaths.length === 0 ? (
+            <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>当前未手动添加目录，将使用系统自动探测目录。</div>
+          ) : (
+            settings.watchPaths.map((path) => (
+              <div
+                key={path}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 10px',
+                  background: 'var(--color-background-tertiary)',
+                  borderRadius: 'var(--border-radius-md)',
+                  border: '0.5px solid var(--color-border-primary)',
+                }}
+              >
+                <span style={{ flex: 1, fontSize: 11, color: 'var(--color-text-secondary)', wordBreak: 'break-all' }}>{path}</span>
+                <button
+                  onClick={() => removeWatchPath(path)}
+                  style={{
+                    border: 'none',
+                    background: 'transparent',
+                    color: 'var(--color-text-tertiary)',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                  }}
+                >
+                  删除
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>静默模式</div>
+        <div style={{ display: 'flex', gap: 8 }}>
           {([
-            { id: 'focus' as const, label: '专注', desc: '仅致命问题才通知' },
-            { id: 'normal' as const, label: '正常', desc: '重要提醒会通知' },
-            { id: 'open' as const, label: '开放', desc: '建议与观察都通知' },
-          ]).map((m) => (
-            <button key={m.id} onClick={() => handleSave({ silenceMode: m.id })}
-              style={{ flex: 1, padding: '8px 12px', fontSize: 11, borderRadius: 'var(--border-radius-md)', cursor: 'pointer', textAlign: 'left',
-                border: settings.silenceMode === m.id ? '0.5px solid var(--color-brand)' : '0.5px solid var(--color-border-primary)',
-                background: settings.silenceMode === m.id ? 'var(--color-brand-light)' : 'transparent',
-                color: settings.silenceMode === m.id ? 'var(--color-brand)' : 'var(--color-text-tertiary)',
+            { id: 'focus' as const, label: '专注', desc: '只在高优先级场景提醒。' },
+            { id: 'normal' as const, label: '正常', desc: '平衡提醒和干扰感。' },
+            { id: 'open' as const, label: '开放', desc: '观察和建议都会展示。' },
+          ]).map((mode) => (
+            <button
+              key={mode.id}
+              onClick={() => handleSave({ silenceMode: mode.id })}
+              style={{
+                flex: 1,
+                padding: '10px 12px',
+                textAlign: 'left',
+                borderRadius: 'var(--border-radius-md)',
+                cursor: 'pointer',
+                border: settings.silenceMode === mode.id ? '0.5px solid var(--color-brand)' : '0.5px solid var(--color-border-primary)',
+                background: settings.silenceMode === mode.id ? 'var(--color-brand-light)' : 'transparent',
+                color: settings.silenceMode === mode.id ? 'var(--color-brand)' : 'var(--color-text-secondary)',
               }}
             >
-              <div style={{ fontWeight: 500, marginBottom: 2 }}>{m.label}</div>
-              <div style={{ fontSize: 10, opacity: 0.7 }}>{m.desc}</div>
+              <div style={{ fontSize: 12, fontWeight: 600 }}>{mode.label}</div>
+              <div style={{ fontSize: 10, opacity: 0.8, marginTop: 4 }}>{mode.desc}</div>
             </button>
           ))}
         </div>
-      </div>
+      </section>
 
-      {/* ── 下班时间 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>下班时间</div>
-        <input type="time" value={settings.offworkTime}
-          onChange={(e) => handleSave({ offworkTime: e.target.value })}
-          style={{ ...inputStyle, width: 'auto' }}
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>下班时间</div>
+        <input
+          type="time"
+          value={settings.offworkTime}
+          onChange={(event) => handleSave({ offworkTime: event.target.value })}
+          style={{ ...inputStyle, width: 140 }}
         />
-        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
-          到达此时间（±15分钟）且停止工作后，触发深层心跳生成日报
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>
+          到达这个时间并满足离岗条件后，更适合触发自动日报整理。
         </div>
-      </div>
+      </section>
 
-      {/* ── 日报发送渠道 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>日报发送渠道</div>
-        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 10 }}>配置后可一键发送到团队群组 · 留空不启用</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div>
-            <label style={{ fontSize: 10, color: 'var(--color-text-tertiary)', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <span style={{ width: 16, height: 16, borderRadius: 4, background: '#1DA1F2', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff', fontWeight: 700 }}>钉</span>
-              钉钉机器人 Webhook
-            </label>
-            <input type="text" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." value={settings.dingtalkWebhook}
-              onChange={(e) => updateSettings({ dingtalkWebhook: e.target.value })}
-              onBlur={(e) => handleSave({ dingtalkWebhook: e.target.value })}
-              style={inputStyle}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#1DA1F2'; }}
-            />
-          </div>
-          <div>
-            <label style={{ fontSize: 10, color: 'var(--color-text-tertiary)', display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <span style={{ width: 16, height: 16, borderRadius: 4, background: '#00C5A8', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: '#fff', fontWeight: 700 }}>书</span>
-              飞书机器人 Webhook
-            </label>
-            <input type="text" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." value={settings.feishuWebhook}
-              onChange={(e) => updateSettings({ feishuWebhook: e.target.value })}
-              onBlur={(e) => handleSave({ feishuWebhook: e.target.value })}
-              style={inputStyle}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#00C5A8'; }}
-            />
-          </div>
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>日报发送渠道</div>
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>
+          配置后可以一键把日报发到钉钉或飞书。留空则不启用。
         </div>
-      </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
+            钉钉 Webhook
+          </label>
+          <input
+            type="text"
+            placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
+            value={settings.dingtalkWebhook}
+            onChange={(event) => updateSettings({ dingtalkWebhook: event.target.value })}
+            onBlur={(event) => handleSave({ dingtalkWebhook: event.target.value })}
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
+            飞书 Webhook
+          </label>
+          <input
+            type="text"
+            placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+            value={settings.feishuWebhook}
+            onChange={(event) => updateSettings({ feishuWebhook: event.target.value })}
+            onBlur={(event) => handleSave({ feishuWebhook: event.target.value })}
+            style={inputStyle}
+          />
+        </div>
+      </section>
 
-      {/* ── 系统 ── */}
-      <div>
-        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 8 }}>系统</div>
+      <section style={cardStyle}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>系统</div>
 
-        {/* 数据目录 */}
-        <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)', marginBottom: 6 }}>数据目录</div>
-          <div style={{ display: 'flex', gap: 6 }}>
+        <div>
+          <label style={{ display: 'block', fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
+            数据目录
+          </label>
+          <div style={{ display: 'flex', gap: 8 }}>
             <input
               type="text"
-              placeholder="留空使用默认目录"
+              placeholder="留空则使用默认目录"
               value={settings.dataDir}
-              onChange={(e) => updateSettings({ dataDir: e.target.value })}
-              onBlur={(e) => { handleSave({ dataDir: e.target.value }); (e.target as HTMLInputElement).style.borderColor = '#333'; }}
+              onChange={(event) => updateSettings({ dataDir: event.target.value })}
+              onBlur={(event) => handleSave({ dataDir: event.target.value })}
               style={{ ...inputStyle, flex: 1 }}
-              onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = '#534AB7'; }}
             />
             <button
               onClick={async () => {
@@ -452,34 +699,73 @@ export default function SettingsTab() {
                   if (selected) {
                     handleSave({ dataDir: selected as string });
                   }
-                } catch (e) {
-                  console.error('[Settings] browse data dir:', e);
+                } catch (error) {
+                  console.error('[Settings] browse data dir failed:', error);
                 }
               }}
-              style={{ padding: '8px 12px', fontSize: 11, borderRadius: 6, cursor: 'pointer', background: 'var(--color-background-secondary)', border: '0.5px solid var(--color-border-primary)', color: 'var(--color-text-secondary)' }}
-            >浏览</button>
+              style={{
+                padding: '8px 12px',
+                fontSize: 11,
+                borderRadius: 8,
+                cursor: 'pointer',
+                background: 'var(--color-background-tertiary)',
+                border: '0.5px solid var(--color-border-primary)',
+                color: 'var(--color-text-secondary)',
+              }}
+            >
+              浏览
+            </button>
           </div>
           <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
-            设为空则使用默认目录 · 每日数据存放在 {settings.dataDir ? settings.dataDir + '/YYYY-MM-DD/' : '%APPDATA%'} 下
+            每日数据库会保存在 {settings.dataDir ? `${settings.dataDir}/YYYY-MM-DD/` : '应用默认目录/YYYY-MM-DD/'}。
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 12px', background: 'var(--color-background-secondary)', borderRadius: 'var(--border-radius-md)' }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '10px 12px',
+            background: 'var(--color-background-tertiary)',
+            borderRadius: 'var(--border-radius-md)',
+            border: '0.5px solid var(--color-border-primary)',
+          }}
+        >
           <div>
             <div style={{ fontSize: 12, color: 'var(--color-text-primary)', marginBottom: 2 }}>开机自动启动</div>
-            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>登录后 Auto-Heart 自动运行，常驻托盘</div>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>登录后自动运行并继续监听。</div>
           </div>
-          <button onClick={toggleAutostart} disabled={autostartLoading}
-            style={{ width: 44, height: 24, borderRadius: 12, border: 'none', cursor: autostartLoading ? 'default' : 'pointer',
+          <button
+            onClick={toggleAutostart}
+            disabled={autostartLoading}
+            style={{
+              width: 44,
+              height: 24,
+              borderRadius: 12,
+              border: 'none',
+              cursor: autostartLoading ? 'default' : 'pointer',
               background: autostartEnabled ? 'var(--color-brand)' : 'var(--color-border-primary)',
-              position: 'relative', transition: 'background 0.2s', opacity: autostartLoading ? 0.6 : 1, flexShrink: 0 }}
+              position: 'relative',
+              opacity: autostartLoading ? 0.6 : 1,
+            }}
           >
-            <span style={{ position: 'absolute', top: 3, left: autostartEnabled ? 23 : 3,
-              width: 18, height: 18, borderRadius: '50%', background: '#fff',
-              transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} />
+            <span
+              style={{
+                position: 'absolute',
+                top: 3,
+                left: autostartEnabled ? 23 : 3,
+                width: 18,
+                height: 18,
+                borderRadius: '50%',
+                background: '#fff',
+                transition: 'left 0.2s',
+                boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+              }}
+            />
           </button>
         </div>
-      </div>
+      </section>
     </div>
   );
 }

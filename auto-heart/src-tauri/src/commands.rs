@@ -2,7 +2,10 @@ use crate::database::DbPool;
 use crate::settings::{AppSettings, SettingsHandle, WindowState};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -86,6 +89,28 @@ pub struct TodayActivitySummary {
     pub categories: Vec<ActivityCategoryStat>,
     pub sessions: Vec<ActivitySessionStat>,
     pub snapshots: Vec<ActivitySnapshotEntry>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct GitCommitEntry {
+    pub repo_path: String,
+    pub short_hash: String,
+    pub summary: String,
+    pub committed_at: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TrackingHealth {
+    pub current_db_path: String,
+    pub watch_paths: Vec<String>,
+    pub repo_paths: Vec<String>,
+    pub today_activity_snapshots: i32,
+    pub today_file_changes: i32,
+    pub today_operation_logs: i32,
+    pub today_git_commits: i32,
+    pub latest_activity_at: Option<String>,
+    pub latest_file_change_at: Option<String>,
+    pub latest_git_commit: Option<GitCommitEntry>,
 }
 
 // ──────────────────────────────────────────────
@@ -279,22 +304,124 @@ fn parse_db_timestamp(value: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
 }
 
-#[tauri::command]
-pub fn get_today_activity_summary(db: State<'_, DbPool>) -> TodayActivitySummary {
-    let db = match db.lock() {
-        Ok(d) => d,
-        Err(_) => {
-            return TodayActivitySummary {
-                total_active_minutes: 0,
-                total_idle_minutes: 0,
-                context_switches: 0,
-                categories: vec![],
-                sessions: vec![],
-                snapshots: vec![],
-            }
-        }
+fn empty_activity_summary() -> TodayActivitySummary {
+    TodayActivitySummary {
+        total_active_minutes: 0,
+        total_idle_minutes: 0,
+        context_switches: 0,
+        categories: vec![],
+        sessions: vec![],
+        snapshots: vec![],
+    }
+}
+
+fn default_tracking_health(watch_paths: Vec<String>) -> TrackingHealth {
+    TrackingHealth {
+        current_db_path: String::new(),
+        watch_paths,
+        repo_paths: vec![],
+        today_activity_snapshots: 0,
+        today_file_changes: 0,
+        today_operation_logs: 0,
+        today_git_commits: 0,
+        latest_activity_at: None,
+        latest_file_change_at: None,
+        latest_git_commit: None,
+    }
+}
+
+fn is_ignored_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "node_modules" | "target" | "dist" | "build" | ".next" | ".turbo" | ".idea"
+    )
+}
+
+fn discover_git_repos(root: &Path, depth: usize, repos: &mut BTreeSet<String>) {
+    if depth == 0 || !root.exists() || !root.is_dir() {
+        return;
+    }
+
+    if root.join(".git").exists() {
+        repos.insert(root.to_string_lossy().to_string());
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
     };
 
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if is_ignored_dir(name) {
+            continue;
+        }
+        discover_git_repos(&path, depth - 1, repos);
+    }
+}
+
+fn collect_repo_paths(watch_paths: &[String]) -> Vec<String> {
+    let mut repos = BTreeSet::new();
+
+    for watch_path in watch_paths {
+        let root = PathBuf::from(watch_path);
+        discover_git_repos(&root, 3, &mut repos);
+    }
+
+    repos.into_iter().collect()
+}
+
+fn collect_today_git_commits(repo_paths: &[String]) -> Vec<GitCommitEntry> {
+    let mut commits = Vec::new();
+
+    for repo_path in repo_paths {
+        let output = Command::new("git")
+            .args([
+                "-C",
+                repo_path,
+                "log",
+                "--since=midnight",
+                "--pretty=format:%h\x1f%ad\x1f%s",
+                "--date=format:%Y-%m-%d %H:%M:%S",
+                "--max-count",
+                "12",
+            ])
+            .output();
+
+        let Ok(output) = output else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\x1f').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+            commits.push(GitCommitEntry {
+                repo_path: repo_path.clone(),
+                short_hash: parts[0].trim().to_string(),
+                committed_at: parts[1].trim().to_string(),
+                summary: parts[2].trim().to_string(),
+            });
+        }
+    }
+
+    commits.sort_by(|left, right| right.committed_at.cmp(&left.committed_at));
+    commits
+}
+
+fn build_today_activity_summary(db: &rusqlite::Connection) -> TodayActivitySummary {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let categories = db
@@ -430,6 +557,474 @@ pub fn get_today_activity_summary(db: State<'_, DbPool>) -> TodayActivitySummary
         sessions: sessions.into_iter().take(6).collect(),
         snapshots,
     }
+}
+
+#[tauri::command]
+pub fn get_today_activity_summary(db: State<'_, DbPool>) -> TodayActivitySummary {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => return empty_activity_summary(),
+    };
+
+    build_today_activity_summary(&db)
+}
+
+#[tauri::command]
+pub fn clear_today_activity_snapshots(db: State<'_, DbPool>) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    db.execute(
+        "DELETE FROM activity_snapshots WHERE date(timestamp) = ?1",
+        rusqlite::params![today],
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_tracking_health(
+    app: AppHandle,
+    settings: State<'_, SettingsHandle>,
+    db: State<'_, DbPool>,
+) -> TrackingHealth {
+    let settings_snapshot = settings.lock().unwrap().clone();
+    let watch_paths = if settings_snapshot.watch_paths.is_empty() {
+        crate::settings::auto_detect_watch_paths()
+    } else {
+        settings_snapshot.watch_paths.clone()
+    };
+
+    let mut health = default_tracking_health(watch_paths.clone());
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let base_dir = if settings_snapshot.data_dir.is_empty() {
+        app.path().app_data_dir().unwrap_or_default()
+    } else {
+        PathBuf::from(&settings_snapshot.data_dir)
+    };
+    health.current_db_path = base_dir
+        .join(&today)
+        .join("auto_heart.db")
+        .to_string_lossy()
+        .to_string();
+
+    let repo_paths = collect_repo_paths(&watch_paths);
+    let git_commits = collect_today_git_commits(&repo_paths);
+    health.today_git_commits = git_commits.len() as i32;
+    health.latest_git_commit = git_commits.first().cloned();
+    health.repo_paths = repo_paths;
+
+    let Ok(db) = db.lock() else {
+        return health;
+    };
+
+    health.today_activity_snapshots = db
+        .query_row(
+            "SELECT COUNT(*) FROM activity_snapshots WHERE date(timestamp) = ?1",
+            rusqlite::params![today.clone()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    health.today_file_changes = db
+        .query_row(
+            "SELECT COUNT(*) FROM file_changes WHERE date(timestamp) = ?1",
+            rusqlite::params![today.clone()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    health.today_operation_logs = db
+        .query_row(
+            "SELECT COUNT(*) FROM operation_log WHERE date(timestamp) = ?1",
+            rusqlite::params![today.clone()],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    health.latest_activity_at = db
+        .query_row(
+            "SELECT timestamp FROM activity_snapshots ORDER BY timestamp DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    health.latest_file_change_at = db
+        .query_row(
+            "SELECT timestamp FROM file_changes ORDER BY timestamp DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    health
+}
+fn should_use_local_activity_summary(content: &str) -> bool {
+    let normalized: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    let has_today = normalized.contains("\u{4eca}\u{5929}")
+        || normalized.contains("\u{4eca}\u{65e5}")
+        || normalized.contains("\u{672c}\u{65e5}");
+    let has_summary = normalized.contains("\u{603b}\u{7ed3}")
+        || normalized.contains("\u{6c47}\u{603b}")
+        || normalized.contains("\u{65e5}\u{62a5}")
+        || normalized.contains("\u{62a5}\u{544a}")
+        || normalized.contains("\u{56de}\u{987e}");
+    let has_local = normalized.contains("\u{76d1}\u{542c}")
+        || normalized.contains("\u{672c}\u{5730}")
+        || normalized.contains("\u{6587}\u{4ef6}")
+        || normalized.contains("\u{8bb0}\u{5f55}");
+    let asks_what_i_did = normalized.contains("\u{6211}\u{90fd}\u{5e72}\u{4e86}\u{4ec0}\u{4e48}")
+        || normalized.contains("\u{4eca}\u{5929}\u{505a}\u{4e86}\u{4ec0}\u{4e48}")
+        || normalized.contains("\u{4eca}\u{5929}\u{90fd}\u{505a}\u{4e86}\u{4ec0}\u{4e48}");
+
+    (has_today && has_summary) || (has_local && has_summary) || asks_what_i_did
+}
+
+fn wants_five_point_report(content: &str) -> bool {
+    let normalized: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    let has_report = normalized.contains("\u{65e5}\u{62a5}")
+        || normalized.contains("\u{603b}\u{7ed3}")
+        || normalized.contains("\u{6c47}\u{603b}")
+        || normalized.contains("\u{56de}\u{987e}");
+    let has_five_points = normalized.contains("\u{4e94}\u{70b9}")
+        || normalized.contains("5\u{70b9}")
+        || normalized.contains("\u{4e94}\u{6761}")
+        || normalized.contains("5\u{6761}")
+        || normalized.contains("\u{4e94}\u{9879}")
+        || normalized.contains("5\u{9879}");
+
+    has_report && has_five_points
+}
+
+fn format_minutes(minutes: i64) -> String {
+    if minutes >= 60 {
+        let hours = minutes / 60;
+        let remain = minutes % 60;
+        if remain == 0 {
+            format!("{} 小时", hours)
+        } else {
+            format!("{} 小时 {} 分钟", hours, remain)
+        }
+    } else {
+        format!("{} 分钟", minutes)
+    }
+}
+
+fn shorten_file_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn build_local_report_from_data(
+    content: &str,
+    db: &DbPool,
+    settings: &AppSettings,
+) -> Option<String> {
+    let db = db.lock().ok()?;
+    let summary = build_today_activity_summary(&db);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let file_changes = db
+        .prepare(
+            "SELECT file_path, change_type, timestamp
+             FROM file_changes
+             WHERE date(timestamp) = ?1
+             ORDER BY timestamp DESC
+             LIMIT 20",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today.clone()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let operation_logs = db
+        .prepare(
+            "SELECT intention_desc, file_path, timestamp
+             FROM operation_log
+             WHERE date(timestamp) = ?1
+             ORDER BY timestamp DESC
+             LIMIT 10",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today.clone()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let existing_report: Option<String> = db
+        .query_row(
+            "SELECT content FROM daily_reports WHERE date = ?1 ORDER BY created_at DESC LIMIT 1",
+            rusqlite::params![today.clone()],
+            |row| row.get(0),
+        )
+        .ok();
+
+    let watch_paths = if settings.watch_paths.is_empty() {
+        crate::settings::auto_detect_watch_paths()
+    } else {
+        settings.watch_paths.clone()
+    };
+    let repo_paths = collect_repo_paths(&watch_paths);
+    let git_commits = collect_today_git_commits(&repo_paths);
+
+    if summary.snapshots.is_empty()
+        && file_changes.is_empty()
+        && operation_logs.is_empty()
+        && existing_report.is_none()
+        && git_commits.is_empty()
+    {
+        return None;
+    }
+
+    if wants_five_point_report(content) {
+        let mut bullets: Vec<String> = Vec::new();
+
+        if let Some(first) = summary.categories.first() {
+            bullets.push(format!(
+                "1. 今天主要时间集中在{}，累计约{}。",
+                first.category,
+                format_minutes(first.minutes as i64)
+            ));
+        } else {
+            bullets.push("1. 今天已经开始有本地工作记录，但分类时长还不够完整。".to_string());
+        }
+
+        if let Some(commit) = git_commits.first() {
+            bullets.push(format!(
+                "2. 代码侧已有提交记录，最近一次提交是 {}（{}）。",
+                commit.summary, commit.short_hash
+            ));
+        } else if let Some(session) = summary.sessions.first() {
+            bullets.push(format!(
+                "2. 最长连续工作段在 {} - {}，主要处理“{}”，持续约{}。",
+                session.start_time,
+                session.end_time,
+                session.label,
+                format_minutes(session.minutes)
+            ));
+        }
+
+        if !file_changes.is_empty() {
+            let files = file_changes
+                .iter()
+                .take(3)
+                .map(|(file_path, _, _)| shorten_file_path(file_path))
+                .collect::<Vec<_>>()
+                .join("、");
+            bullets.push(format!("3. 本地文件有持续修改，最近涉及：{}。", files));
+        } else {
+            bullets.push("3. 今天暂时还没有采集到明确的文件修改记录。".to_string());
+        }
+
+        if !summary.snapshots.is_empty() {
+            let docs = summary
+                .snapshots
+                .iter()
+                .filter(|item| {
+                    let app = item.app_name.to_lowercase();
+                    app.contains("wps") || app.contains("chrome") || app.contains("edge")
+                })
+                .take(2)
+                .map(|item| format!("{}：{}", item.app_name, item.window_title))
+                .collect::<Vec<_>>();
+            if !docs.is_empty() {
+                bullets.push(format!("4. 文档和浏览器侧的主要操作包括：{}。", docs.join("；")));
+            }
+        } else {
+            bullets.push(format!(
+                "4. 今天发生了 {} 次上下文切换，说明工作在不同窗口和任务间来回切换。",
+                summary.context_switches
+            ));
+        }
+
+        if !operation_logs.is_empty() {
+            let intentions = operation_logs
+                .iter()
+                .take(2)
+                .map(|(intention, _, _)| intention.clone())
+                .collect::<Vec<_>>()
+                .join("；");
+            bullets.push(format!("5. 从本地操作日志判断，今天的工作重点包括：{}。", intentions));
+        } else if let Some(report) = existing_report {
+            let preview = report
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("已有日报草稿");
+            bullets.push(format!("5. 系统里已经有一份日报草稿，可继续润色：{}。", preview));
+        } else {
+            bullets.push("5. 这些记录已经足够继续整理成正式日报，可以让我继续改写成对外发送版本。".to_string());
+        }
+
+        let mut lines = vec![
+            "<think>".to_string(),
+            "我优先读取了今天的本地活动快照、文件变更、操作日志、Git 提交和已有日报草稿，再按日报口径整理成五点总结。".to_string(),
+            "</think>".to_string(),
+            String::new(),
+            "基于今天的本地记录，日报可以先总结为这五点：".to_string(),
+        ];
+        lines.extend(bullets);
+        return Some(lines.join("\n"));
+    }
+
+    None
+}
+
+fn build_local_activity_chat_reply(db: &DbPool) -> String {
+    let db = match db.lock() {
+        Ok(d) => d,
+        Err(_) => {
+            return "<think>\n我尝试读取本地监听数据库，但数据库当前不可用，所以没法生成准确摘要。\n</think>\n\n现在暂时拿不到监听数据，请稍后再试。".to_string();
+        }
+    };
+
+    let summary = build_today_activity_summary(&db);
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let file_changes = db
+        .prepare(
+            "SELECT file_path, change_type, timestamp
+             FROM file_changes
+             WHERE date(timestamp) = ?1
+             ORDER BY timestamp DESC
+             LIMIT 8",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today.clone()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let operation_logs = db
+        .prepare(
+            "SELECT intention_desc, file_path, timestamp
+             FROM operation_log
+             WHERE date(timestamp) = ?1
+             ORDER BY timestamp DESC
+             LIMIT 5",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map(rusqlite::params![today.clone()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    if summary.snapshots.is_empty() && file_changes.is_empty() && operation_logs.is_empty() {
+        return "<think>\n我已经检查了今天的前台活动快照、文件变更和操作意图日志，但当前数据库里还没有可用于总结的记录。\n</think>\n\n今天暂时还没有监听到可汇总的本地操作数据。你可以先继续使用电脑一段时间，再让我帮你总结。".to_string();
+    }
+
+    let mut lines = vec![
+        "<think>".to_string(),
+        "我先读取今天的本地监听数据，包括前台窗口快照、文件变更记录和操作意图日志，再按活跃时长、切换次数、主要工作分类和最近动作整理成摘要。".to_string(),
+        "</think>".to_string(),
+        String::new(),
+        "我已经根据本地监听数据整理了你今天的活动：".to_string(),
+        format!(
+            "活跃时长约 {}，空闲时长约 {}，上下文切换 {} 次。",
+            format_minutes(summary.total_active_minutes),
+            format_minutes(summary.total_idle_minutes),
+            summary.context_switches,
+        ),
+    ];
+
+    if !summary.categories.is_empty() {
+        let category_text = summary
+            .categories
+            .iter()
+            .take(4)
+            .map(|item| format!("{} {} ", item.category, format_minutes(item.minutes as i64)))
+            .collect::<String>()
+            .trim()
+            .replace("  ", "，");
+        lines.push(format!("主要时间分布：{}。", category_text));
+    }
+
+    if let Some(session) = summary.sessions.first() {
+        lines.push(format!(
+            "最长连续工作段是 {}，时间在 {} - {}，持续约 {}。",
+            session.label,
+            session.start_time,
+            session.end_time,
+            format_minutes(session.minutes),
+        ));
+    }
+
+    if !summary.snapshots.is_empty() {
+        lines.push(String::new());
+        lines.push("最近前台活动：".to_string());
+        for snapshot in summary.snapshots.iter().take(5) {
+            let title = if snapshot.window_title.is_empty() {
+                snapshot.app_name.clone()
+            } else {
+                format!("{} / {}", snapshot.app_name, snapshot.window_title)
+            };
+            let time = snapshot.timestamp.get(11..16).unwrap_or(&snapshot.timestamp);
+            lines.push(format!("- {} {} [{}]", time, title, snapshot.category));
+        }
+    }
+
+    if !file_changes.is_empty() {
+        lines.push(String::new());
+        lines.push("最近文件变更：".to_string());
+        for (file_path, change_type, timestamp) in file_changes.iter().take(5) {
+            let time = timestamp.get(11..16).unwrap_or(timestamp);
+            lines.push(format!(
+                "- {} {} {}",
+                time,
+                change_type,
+                shorten_file_path(file_path),
+            ));
+        }
+    }
+
+    if !operation_logs.is_empty() {
+        lines.push(String::new());
+        lines.push("监听判断出的工作意图：".to_string());
+        for (intention, file_path, timestamp) in operation_logs.iter().take(3) {
+            let time = timestamp.get(11..16).unwrap_or(timestamp);
+            lines.push(format!(
+                "- {} {} [{}]",
+                time,
+                intention,
+                shorten_file_path(file_path),
+            ));
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// 手动添加意图（用户在设置中输入）
@@ -860,34 +1455,52 @@ pub async fn send_message(
     db: State<'_, DbPool>,
 ) -> Result<ChatMessage, String> {
     let data_dir = app.path().app_data_dir().unwrap_or_default();
-
-    // 获取或创建会话
     let mut conv = crate::conversation::get_conversation(&data_dir, &session_id)
         .unwrap_or_else(|| crate::conversation::Conversation::new(&content));
 
-    // 添加用户消息
     let user_msg = crate::conversation::Message {
         id: Uuid::new_v4().to_string(),
         role: "user".to_string(),
         content: content.clone(),
         timestamp: chrono::Local::now().to_rfc3339(),
     };
-    conv.messages.push(user_msg.clone());
+    conv.messages.push(user_msg);
     conv.updated_at = chrono::Local::now().to_rfc3339();
     crate::conversation::save_conversation(&data_dir, &conv)?;
 
-    // 调用 LLM
     let settings_snap = settings.lock().unwrap().clone();
 
-    // 构建消息历史
-    let oai_messages: Vec<crate::model_router::OaiMessage> = conv.messages.iter().map(|m| {
-        crate::model_router::OaiMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        }
-    }).collect();
+    if should_use_local_activity_summary(&content) {
+        let local_reply = build_local_report_from_data(&content, &db, &settings_snap)
+            .unwrap_or_else(|| build_local_activity_chat_reply(&db));
+        let assistant_msg = crate::conversation::Message {
+            id: Uuid::new_v4().to_string(),
+            role: "assistant".to_string(),
+            content: local_reply,
+            timestamp: chrono::Local::now().to_rfc3339(),
+        };
 
-    // 调用模型
+        conv.messages.push(assistant_msg.clone());
+        conv.updated_at = chrono::Local::now().to_rfc3339();
+        crate::conversation::save_conversation(&data_dir, &conv)?;
+
+        return Ok(ChatMessage {
+            id: assistant_msg.id,
+            role: assistant_msg.role,
+            content: assistant_msg.content,
+            timestamp: assistant_msg.timestamp,
+        });
+    }
+
+    let oai_messages: Vec<crate::model_router::OaiMessage> = conv
+        .messages
+        .iter()
+        .map(|message| crate::model_router::OaiMessage {
+            role: message.role.clone(),
+            content: message.content.clone(),
+        })
+        .collect();
+
     let chat_model = if settings_snap.chat_model.is_empty() {
         &settings_snap.middle_model
     } else {
@@ -902,27 +1515,23 @@ pub async fn send_message(
         chat_model,
         chat_model_name,
         &settings_snap,
-    ).ok_or("Chat model not configured. Please set chat_model in settings.")?;
+    )
+    .ok_or("Chat model not configured. Please set chat_model in settings.")?;
 
-    let response = crate::model_router::call_chat_model_with_messages(
-        &model_config,
-        &oai_messages,
-    ).await?;
+    let response =
+        crate::model_router::call_chat_model_with_messages(&model_config, &oai_messages).await?;
 
-    // 添加助手消息
     let assistant_msg = crate::conversation::Message {
         id: Uuid::new_v4().to_string(),
         role: "assistant".to_string(),
-        content: response.clone(),
+        content: response,
         timestamp: chrono::Local::now().to_rfc3339(),
     };
 
-    // 更新会话
     conv.messages.push(assistant_msg.clone());
     conv.updated_at = chrono::Local::now().to_rfc3339();
     crate::conversation::save_conversation(&data_dir, &conv)?;
 
-    // 检查是否包含意图关键词
     if contains_intent_keywords(&content) {
         let _ = parse_intent_from_chat(&content, &settings_snap, &db);
     }
