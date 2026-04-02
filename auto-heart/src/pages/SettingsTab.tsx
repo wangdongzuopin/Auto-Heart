@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { Settings, useSettings } from '../hooks/useSettings';
@@ -117,7 +117,9 @@ function LayerModelPicker({
   settings,
   onProviderChange,
   onModelNameChange,
+  onModelNameCommit,
   onKeyChange,
+  onKeyCommit,
 }: {
   label: string;
   hint: string;
@@ -126,7 +128,9 @@ function LayerModelPicker({
   settings: Settings;
   onProviderChange: (provider: string) => void;
   onModelNameChange: (name: string) => void;
+  onModelNameCommit: (name: string) => void;
   onKeyChange: (keyField: keyof Settings, value: string) => void;
+  onKeyCommit: (keyField: keyof Settings, value: string) => void;
 }) {
   const provider = PROVIDERS.find((item) => item.id === selectedProvider) ?? PROVIDERS[0];
   const keyField = provider.keyField;
@@ -215,7 +219,7 @@ function LayerModelPicker({
               placeholder={KEY_PLACEHOLDERS[keyField] ?? 'sk-...'}
               value={currentKey}
               onChange={(event) => onKeyChange(keyField, event.target.value)}
-              onBlur={(event) => onKeyChange(keyField, event.target.value)}
+              onBlur={(event) => onKeyCommit(keyField, event.target.value)}
               style={inputStyle}
             />
           </div>
@@ -229,7 +233,7 @@ function LayerModelPicker({
               placeholder="http://localhost:11434"
               value={settings.ollamaBaseUrl}
               onChange={(event) => onKeyChange('ollamaBaseUrl', event.target.value)}
-              onBlur={(event) => onKeyChange('ollamaBaseUrl', event.target.value)}
+              onBlur={(event) => onKeyCommit('ollamaBaseUrl', event.target.value)}
               style={inputStyle}
             />
           </div>
@@ -257,7 +261,7 @@ function LayerModelPicker({
               placeholder={provider.id === 'ollama' ? 'qwen2.5:7b' : '输入实际模型名'}
               value={selectedModelName}
               onChange={(event) => onModelNameChange(event.target.value)}
-              onBlur={(event) => onModelNameChange(event.target.value)}
+              onBlur={(event) => onModelNameCommit(event.target.value)}
               style={inputStyle}
             />
           )}
@@ -268,7 +272,7 @@ function LayerModelPicker({
 }
 
 export default function SettingsTab() {
-  const { settings, updateSettings, saveToHome, loading } = useSettings();
+  const { settings, setLocalSettings, updateSettings, saveToHome, loading } = useSettings();
   const [watchPathInput, setWatchPathInput] = useState('');
   const [saved, setSaved] = useState(false);
   const [savedHome, setSavedHome] = useState(false);
@@ -276,6 +280,9 @@ export default function SettingsTab() {
   const [autostartLoading, setAutostartLoading] = useState(false);
   const [trackingHealth, setTrackingHealth] = useState<TrackingHealth | null>(null);
   const [trackingHealthLoading, setTrackingHealthLoading] = useState(false);
+  const savedTimerRef = useRef<number | null>(null);
+  const savedHomeTimerRef = useRef<number | null>(null);
+  const healthRefreshTimerRef = useRef<number | null>(null);
 
   const loadTrackingHealth = useCallback(async () => {
     setTrackingHealthLoading(true);
@@ -295,26 +302,56 @@ export default function SettingsTab() {
       .then((value) => setAutostartEnabled(value))
       .catch(() => {});
     loadTrackingHealth();
+
+    return () => {
+      if (savedTimerRef.current) window.clearTimeout(savedTimerRef.current);
+      if (savedHomeTimerRef.current) window.clearTimeout(savedHomeTimerRef.current);
+      if (healthRefreshTimerRef.current) window.clearTimeout(healthRefreshTimerRef.current);
+    };
   }, [loadTrackingHealth]);
 
+  const scheduleTrackingHealthRefresh = useCallback(
+    (delay = 600) => {
+      if (healthRefreshTimerRef.current) {
+        window.clearTimeout(healthRefreshTimerRef.current);
+      }
+      healthRefreshTimerRef.current = window.setTimeout(() => {
+        loadTrackingHealth();
+        healthRefreshTimerRef.current = null;
+      }, delay);
+    },
+    [loadTrackingHealth],
+  );
+
   const handleSave = useCallback(
-    async (patch: Partial<Settings>) => {
+    async (patch: Partial<Settings>, options?: { refreshTrackingHealth?: boolean }) => {
       await updateSettings(patch);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-      setTimeout(() => {
-        loadTrackingHealth();
-      }, 150);
+      if (savedTimerRef.current) {
+        window.clearTimeout(savedTimerRef.current);
+      }
+      savedTimerRef.current = window.setTimeout(() => {
+        setSaved(false);
+        savedTimerRef.current = null;
+      }, 2000);
+      if (options?.refreshTrackingHealth) {
+        scheduleTrackingHealthRefresh();
+      }
     },
-    [loadTrackingHealth, updateSettings],
+    [scheduleTrackingHealthRefresh, updateSettings],
   );
 
   const handleSaveToHome = async () => {
     try {
       await saveToHome();
       setSavedHome(true);
-      setTimeout(() => setSavedHome(false), 2000);
-      loadTrackingHealth();
+      if (savedHomeTimerRef.current) {
+        window.clearTimeout(savedHomeTimerRef.current);
+      }
+      savedHomeTimerRef.current = window.setTimeout(() => {
+        setSavedHome(false);
+        savedHomeTimerRef.current = null;
+      }, 2000);
     } catch {
       // noop
     }
@@ -342,12 +379,12 @@ export default function SettingsTab() {
     if (!trimmed || settings.watchPaths.includes(trimmed)) {
       return;
     }
-    handleSave({ watchPaths: [...settings.watchPaths, trimmed] });
+    handleSave({ watchPaths: [...settings.watchPaths, trimmed] }, { refreshTrackingHealth: true });
     setWatchPathInput('');
   };
 
   const removeWatchPath = (path: string) => {
-    handleSave({ watchPaths: settings.watchPaths.filter((item) => item !== path) });
+    handleSave({ watchPaths: settings.watchPaths.filter((item) => item !== path) }, { refreshTrackingHealth: true });
   };
 
   if (loading) {
@@ -511,13 +548,21 @@ export default function SettingsTab() {
           })
         }
         onModelNameChange={(name) =>
+          setLocalSettings({
+            middleModelName: name,
+            deepModelName: name,
+            chatModelName: name,
+          })
+        }
+        onModelNameCommit={(name) =>
           handleSave({
             middleModelName: name,
             deepModelName: name,
             chatModelName: name,
           })
         }
-        onKeyChange={(field, value) => handleSave({ [field]: value } as Partial<Settings>)}
+        onKeyChange={(field, value) => setLocalSettings({ [field]: value } as Partial<Settings>)}
+        onKeyCommit={(field, value) => handleSave({ [field]: value } as Partial<Settings>)}
       />
 
       <section style={cardStyle}>
@@ -526,7 +571,7 @@ export default function SettingsTab() {
           type="text"
           placeholder="支持 Notion / Obsidian / 本地 txt 路径"
           value={settings.intentDocPath}
-          onChange={(event) => updateSettings({ intentDocPath: event.target.value })}
+          onChange={(event) => setLocalSettings({ intentDocPath: event.target.value })}
           onBlur={(event) => handleSave({ intentDocPath: event.target.value })}
           style={inputStyle}
         />
@@ -656,7 +701,7 @@ export default function SettingsTab() {
             type="text"
             placeholder="https://oapi.dingtalk.com/robot/send?access_token=..."
             value={settings.dingtalkWebhook}
-            onChange={(event) => updateSettings({ dingtalkWebhook: event.target.value })}
+            onChange={(event) => setLocalSettings({ dingtalkWebhook: event.target.value })}
             onBlur={(event) => handleSave({ dingtalkWebhook: event.target.value })}
             style={inputStyle}
           />
@@ -669,7 +714,7 @@ export default function SettingsTab() {
             type="text"
             placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
             value={settings.feishuWebhook}
-            onChange={(event) => updateSettings({ feishuWebhook: event.target.value })}
+            onChange={(event) => setLocalSettings({ feishuWebhook: event.target.value })}
             onBlur={(event) => handleSave({ feishuWebhook: event.target.value })}
             style={inputStyle}
           />
@@ -688,8 +733,8 @@ export default function SettingsTab() {
               type="text"
               placeholder="留空则使用默认目录"
               value={settings.dataDir}
-              onChange={(event) => updateSettings({ dataDir: event.target.value })}
-              onBlur={(event) => handleSave({ dataDir: event.target.value })}
+              onChange={(event) => setLocalSettings({ dataDir: event.target.value })}
+              onBlur={(event) => handleSave({ dataDir: event.target.value }, { refreshTrackingHealth: true })}
               style={{ ...inputStyle, flex: 1 }}
             />
             <button
@@ -697,7 +742,7 @@ export default function SettingsTab() {
                 try {
                   const selected = await open({ directory: true, multiple: false });
                   if (selected) {
-                    handleSave({ dataDir: selected as string });
+                    handleSave({ dataDir: selected as string }, { refreshTrackingHealth: true });
                   }
                 } catch (error) {
                   console.error('[Settings] browse data dir failed:', error);

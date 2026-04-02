@@ -138,15 +138,24 @@ export function useSettings() {
       .finally(() => setLoading(false));
   }, []);
 
-  const updateSettings = useCallback(async (patch: Partial<Settings>) => {
-    const updated = { ...settings, ...patch };
-    setSettings(updated);
+  const setLocalSettings = useCallback((patch: Partial<Settings>) => {
+    setSettings((current) => ({ ...current, ...patch }));
+  }, []);
+
+  const persistSettings = useCallback(async (nextSettings?: Settings) => {
+    const target = nextSettings ?? settings;
     try {
-      await invokeWithTimeout('save_settings', { newSettings: toRust(updated) });
+      await invokeWithTimeout('save_settings', { newSettings: toRust(target) });
     } catch (err) {
       console.error('[useSettings] save failed:', err);
     }
   }, [settings]);
+
+  const updateSettings = useCallback(async (patch: Partial<Settings>) => {
+    const updated = { ...settings, ...patch };
+    setSettings(updated);
+    await persistSettings(updated);
+  }, [persistSettings, settings]);
 
   /// 保存到用户主目录 ~/.autoheart
   const saveToHome = useCallback(async () => {
@@ -158,5 +167,5 @@ export function useSettings() {
     }
   }, [settings]);
 
-  return { settings, updateSettings, saveToHome, loading };
+  return { settings, setLocalSettings, persistSettings, updateSettings, saveToHome, loading };
 }

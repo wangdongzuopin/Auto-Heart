@@ -1,15 +1,31 @@
 use crate::database::DbPool;
 use crate::model_router::ModelRouter;
 use crate::settings::SettingsHandle;
-use chrono::Timelike;
+use chrono::{NaiveDateTime, Timelike};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
+
+pub type FileWatcherGeneration = Arc<AtomicU64>;
+
+pub fn new_file_watcher_generation() -> FileWatcherGeneration {
+    Arc::new(AtomicU64::new(0))
+}
+
+pub fn stop_file_watcher(watcher_generation: &FileWatcherGeneration) {
+    watcher_generation.fetch_add(1, Ordering::SeqCst);
+}
 
 // ──────────────────────────────────────────────
 // 操作日志 — 意图分析数据结构
@@ -37,7 +53,7 @@ struct FileChangeRecord {
     change_type: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ActiveWindowSnapshot {
     app_name: String,
     window_title: String,
@@ -50,22 +66,58 @@ struct ActiveWindowSnapshot {
 /// 技术文档 §2.2：感知文件变更、活跃应用、意图文档、行为信号
 pub fn start_shallow_heartbeat(app: AppHandle, db: DbPool, _settings: SettingsHandle) {
     thread::spawn(move || {
-        loop {
-            thread::sleep(Duration::from_secs(30));
+        let settings = _settings;
+        let mut last_window: Option<ActiveWindowSnapshot> = None;
+        let mut last_snapshot_at = Instant::now() - Duration::from_secs(301);
+        let mut last_flush_check_at = Instant::now() - Duration::from_secs(10);
+        let mut last_heartbeat_emit_at = Instant::now() - Duration::from_secs(31);
 
-            // 1. 活跃应用检测
+        loop {
+            thread::sleep(Duration::from_secs(2));
+
+            // 1. 活跃应用检测：窗口变化时立刻记录，同窗口则低频保活
             let active_window = get_active_window();
             if !active_window.app_name.is_empty() && active_window.app_name != "unknown" {
-                log_activity_snapshot(&db, &active_window);
+                let window_changed = last_window
+                    .as_ref()
+                    .map(|previous| has_meaningful_window_change(previous, &active_window))
+                    .unwrap_or(true);
+                let keepalive_due = !window_changed && last_snapshot_at.elapsed() >= Duration::from_secs(300);
+
+                if window_changed || keepalive_due {
+                    let source = if window_changed {
+                        "foreground_change"
+                    } else {
+                        "foreground_keepalive"
+                    };
+                    log_activity_snapshot(&db, &active_window, source);
+                    last_window = Some(active_window.clone());
+                    last_snapshot_at = Instant::now();
+                }
             }
 
-            // 2. 自然节点检测：若 90 秒内无文件变更，释放 P1 消息
-            let has_pending = check_and_flush_pending_messages(&app, &db);
-            if has_pending {
-                let _ = app.emit("message_queue:flush", ());
+            let intent_doc_path = settings
+                .lock()
+                .ok()
+                .map(|snapshot| snapshot.intent_doc_path.clone())
+                .unwrap_or_default();
+            if !intent_doc_path.trim().is_empty() {
+                check_intent_doc_update(&db, intent_doc_path.trim());
             }
 
-            let _ = app.emit("heartbeat:shallow", ());
+            // 2. 自然节点检测：更高频检查，但只在满足条件时释放消息
+            if last_flush_check_at.elapsed() >= Duration::from_secs(5) {
+                let has_pending = check_and_flush_pending_messages(&app, &db);
+                if has_pending {
+                    let _ = app.emit("message_queue:flush", ());
+                }
+                last_flush_check_at = Instant::now();
+            }
+
+            if last_heartbeat_emit_at.elapsed() >= Duration::from_secs(30) {
+                let _ = app.emit("heartbeat:shallow", ());
+                last_heartbeat_emit_at = Instant::now();
+            }
         }
     });
 }
@@ -257,7 +309,560 @@ fn classify_activity(app_name: &str, window_title: &str) -> &'static str {
     }
 }
 
-fn log_activity_snapshot(db: &DbPool, snapshot: &ActiveWindowSnapshot) {
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_window_title(title: &str) -> String {
+    collapse_whitespace(
+        &title
+            .replace('\u{200b}', " ")
+            .replace('\u{feff}', " ")
+            .replace('•', " ")
+            .replace('●', " ")
+            .replace('·', " ")
+            .replace('|', " | "),
+    )
+    .trim()
+    .to_lowercase()
+}
+
+fn split_title_segments(title: &str) -> Vec<String> {
+    title
+        .split(['-', '—', '|'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn has_meaningful_window_change(previous: &ActiveWindowSnapshot, current: &ActiveWindowSnapshot) -> bool {
+    previous.app_name.to_lowercase() != current.app_name.to_lowercase()
+        || normalize_window_title(&previous.window_title) != normalize_window_title(&current.window_title)
+}
+
+fn is_browser_app(app_name: &str) -> bool {
+    matches!(
+        app_name.to_lowercase().as_str(),
+        "chrome" | "msedge" | "edge" | "firefox" | "safari" | "arc" | "zen"
+    )
+}
+
+fn is_editor_app(app_name: &str) -> bool {
+    matches!(
+        app_name.to_lowercase().as_str(),
+        "code"
+            | "cursor"
+            | "windsurf"
+            | "code - insiders"
+            | "idea64"
+            | "pycharm64"
+            | "webstorm64"
+            | "goland64"
+            | "clion64"
+            | "rustrover64"
+    )
+}
+
+fn summarize_browser_activity(title: &str) -> Option<String> {
+    let segments = split_title_segments(title);
+    let page = segments.first()?.trim();
+    let site = segments.last().unwrap_or(&segments[0]).trim();
+    let site_lower = site.to_lowercase();
+    let page_lower = page.to_lowercase();
+
+    let summary = if site_lower.contains("github") {
+        format!("浏览 GitHub：{}", page)
+    } else if site_lower.contains("gitlab") {
+        format!("浏览 GitLab：{}", page)
+    } else if site_lower.contains("gitee") {
+        format!("浏览 Gitee：{}", page)
+    } else if site_lower.contains("notion") || site_lower.contains("语雀") || site_lower.contains("yuque") {
+        format!("查阅文档：{}", page)
+    } else if site_lower.contains("google")
+        || site_lower.contains("bing")
+        || site_lower.contains("baidu")
+        || page_lower.contains("search")
+        || page_lower.contains("搜索")
+    {
+        format!("检索资料：{}", page)
+    } else if page != site {
+        format!("浏览 {}：{}", site, page)
+    } else {
+        format!("浏览网页：{}", page)
+    };
+
+    Some(summary)
+}
+
+fn collect_recent_file_paths(db: &DbPool, minutes_back: i64, limit: usize) -> Vec<String> {
+    let db = match db.lock() {
+        Ok(connection) => connection,
+        Err(_) => return vec![],
+    };
+    let mut stmt = match db.prepare(
+        "SELECT file_path
+         FROM file_changes
+         WHERE timestamp > datetime('now', ?1)
+         ORDER BY timestamp DESC
+         LIMIT ?2",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return vec![],
+    };
+
+    stmt.query_map(
+        rusqlite::params![format!("-{} minutes", minutes_back), limit as i64],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|rows| rows.filter_map(|row| row.ok()).collect())
+    .unwrap_or_default()
+}
+
+fn collect_recent_operation_intentions(db: &DbPool, minutes_back: i64, limit: usize) -> Vec<String> {
+    let db = match db.lock() {
+        Ok(connection) => connection,
+        Err(_) => return vec![],
+    };
+    let mut stmt = match db.prepare(
+        "SELECT intention_desc
+         FROM operation_log
+         WHERE timestamp > datetime('now', ?1)
+           AND intention_desc != ''
+         ORDER BY timestamp DESC
+         LIMIT ?2",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return vec![],
+    };
+
+    stmt.query_map(
+        rusqlite::params![format!("-{} minutes", minutes_back), limit as i64],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|rows| {
+        rows.filter_map(|row| row.ok())
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn current_task_hint(db: &DbPool) -> Option<String> {
+    let db = db.lock().ok()?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let json_str: String = db
+        .query_row(
+            "SELECT parsed_tasks
+             FROM intent_history
+             WHERE date(created_at) = ?1 AND parsed_tasks != '[]'
+             ORDER BY created_at DESC
+             LIMIT 1",
+            rusqlite::params![today],
+            |row| row.get(0),
+        )
+        .ok()?;
+
+    let tasks: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    tasks
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.get("task").and_then(|value| value.as_str()))
+        .map(str::trim)
+        .find(|task| !task.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn dedupe_preserve_order(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items.into_iter()
+        .filter(|item| seen.insert(item.to_lowercase()))
+        .collect()
+}
+
+fn infer_focus_from_branch(branch: &str) -> Option<String> {
+    let normalized = branch.replace(['_', '-'], " ");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let ignored = ["main", "master", "develop", "dev", "release", "staging", "production"];
+    if ignored.iter().any(|item| trimmed.eq_ignore_ascii_case(item)) {
+        return None;
+    }
+
+    let cleaned = trimmed
+        .strip_prefix("feature/")
+        .or_else(|| trimmed.strip_prefix("feat/"))
+        .or_else(|| trimmed.strip_prefix("fix/"))
+        .or_else(|| trimmed.strip_prefix("hotfix/"))
+        .or_else(|| trimmed.strip_prefix("chore/"))
+        .or_else(|| trimmed.strip_prefix("refactor/"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(format!("推进 {}", cleaned))
+    }
+}
+
+fn infer_focus_from_files(paths: &[String]) -> Option<String> {
+    let labels = dedupe_preserve_order(
+        paths.iter()
+            .take(6)
+            .filter_map(|path| {
+                let normalized = path.replace('\\', "/");
+                let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+                if parts.is_empty() {
+                    return None;
+                }
+
+                if let Some(index) = parts.iter().position(|part| *part == "src") {
+                    let after_src: Vec<&str> = parts.iter().skip(index + 1).take(2).copied().collect();
+                    if !after_src.is_empty() {
+                        return Some(after_src.join("/"));
+                    }
+                }
+
+                if parts.len() >= 2 {
+                    Some(format!("{}/{}", parts[parts.len() - 2], parts[parts.len() - 1]))
+                } else {
+                    parts.last().map(|part| (*part).to_string())
+                }
+            })
+            .collect(),
+    );
+
+    if labels.is_empty() {
+        None
+    } else if labels.len() == 1 {
+        Some(format!("处理 {}", labels[0]))
+    } else {
+        Some(format!("围绕 {} 等模块开发", labels[..labels.len().min(2)].join("、")))
+    }
+}
+
+fn shorten_path_label(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() <= 3 {
+        return path;
+    }
+
+    parts[parts.len().saturating_sub(3)..].join("/")
+}
+
+fn find_git_repo_root(path: &Path) -> Option<PathBuf> {
+    let mut current = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+}
+
+fn current_git_branch(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "branch", "--show-current"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+fn summarize_editor_activity(db: &DbPool, snapshot: &ActiveWindowSnapshot) -> Option<String> {
+    let segments = split_title_segments(&snapshot.window_title);
+    let mut meaningful = segments
+        .into_iter()
+        .filter(|segment| {
+            let lower = segment.to_lowercase();
+            !lower.contains("visual studio code")
+                && !lower.contains("cursor")
+                && !lower.contains("windsurf")
+                && !lower.contains("administrator")
+        })
+        .collect::<Vec<_>>();
+
+    let primary_label = if let Some(first) = meaningful.first() {
+        first.clone()
+    } else if snapshot.window_title.is_empty() {
+        snapshot.app_name.clone()
+    } else {
+        snapshot.window_title.clone()
+    };
+
+    let workspace = if meaningful.len() >= 2 {
+        meaningful.get(1).cloned()
+    } else {
+        None
+    };
+
+    let recent_files = collect_recent_file_paths(db, 12, 6);
+    let recent_intentions = dedupe_preserve_order(collect_recent_operation_intentions(db, 20, 4));
+    let file_hint = if recent_files.is_empty() {
+        None
+    } else {
+        Some(
+            recent_files
+                .iter()
+                .take(3)
+                .map(|path| shorten_path_label(path))
+                .collect::<Vec<_>>()
+                .join("、"),
+        )
+    };
+    let task_hint = current_task_hint(db);
+    let inferred_file_focus = infer_focus_from_files(&recent_files);
+
+    let branch = recent_files
+        .iter()
+        .find_map(|file| find_git_repo_root(Path::new(file)))
+        .and_then(|repo_root| current_git_branch(&repo_root));
+    let branch_focus = branch.as_ref().and_then(|item| infer_focus_from_branch(item));
+    let active_focus = recent_intentions
+        .first()
+        .cloned()
+        .or(task_hint)
+        .or(branch_focus)
+        .or(inferred_file_focus);
+
+    let mut parts = vec![format!("编码开发：{}", primary_label)];
+    if let Some(task) = active_focus {
+        parts.push(format!("当前更像在实现“{}”", task));
+    } else if let Some(workspace_name) = workspace {
+        parts.push(format!("工作区 {}", workspace_name));
+    }
+    if let Some(files) = file_hint {
+        parts.push(format!("最近改动 {}", files));
+    }
+    if let Some(branch_name) = branch {
+        parts.push(format!("分支 {}", branch_name));
+    }
+
+    if recent_intentions.len() > 1 {
+        parts.push(format!(
+            "近期还在处理 {}",
+            recent_intentions[1..recent_intentions.len().min(3)].join("、")
+        ));
+    }
+
+    meaningful.clear();
+    Some(parts.join(" | "))
+}
+
+fn build_activity_details(db: &DbPool, snapshot: &ActiveWindowSnapshot, category: &str) -> String {
+    let app_name = snapshot.app_name.trim();
+    let title = snapshot.window_title.trim();
+
+    if is_editor_app(app_name) {
+        if let Some(summary) = summarize_editor_activity(db, snapshot) {
+            return summary;
+        }
+    }
+
+    if is_browser_app(app_name) {
+        if let Some(summary) = summarize_browser_activity(title) {
+            return summary;
+        }
+    }
+
+    if title.is_empty() {
+        format!("{}：{}", category, app_name)
+    } else {
+        format!("{}：{} / {}", category, app_name, title)
+    }
+}
+
+fn parse_db_time(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+fn build_work_session_signature(snapshot: &ActiveWindowSnapshot, category: &str) -> String {
+    format!(
+        "{}|{}|{}",
+        snapshot.app_name.trim().to_lowercase(),
+        category.trim().to_lowercase(),
+        normalize_window_title(&snapshot.window_title),
+    )
+}
+
+fn upsert_work_session(
+    db: &rusqlite::Connection,
+    snapshot: &ActiveWindowSnapshot,
+    category: &str,
+    source: &str,
+    details: &str,
+) {
+    let signature = build_work_session_signature(snapshot, category);
+    let latest_session = db
+        .query_row(
+            "SELECT id, signature, end_time
+             FROM work_sessions
+             WHERE date(start_time) = date('now')
+             ORDER BY end_time DESC
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten();
+
+    if let Some((session_id, previous_signature, previous_end)) = latest_session {
+        let can_merge = previous_signature == signature
+            && parse_db_time(&previous_end)
+                .map(|end_time| (chrono::Local::now().naive_local() - end_time).num_minutes() <= 5)
+                .unwrap_or(false);
+
+        if can_merge {
+            let _ = db.execute(
+                "UPDATE work_sessions
+                 SET end_time = datetime('now'),
+                     updated_at = datetime('now'),
+                     summary = ?1,
+                     source = ?2,
+                     window_title = ?3
+                 WHERE id = ?4",
+                rusqlite::params![details, source, snapshot.window_title, session_id],
+            );
+            return;
+        }
+    }
+
+    let _ = db.execute(
+        "INSERT INTO work_sessions
+         (id, app_name, window_title, category, summary, signature, source, start_time, end_time, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now'), datetime('now'))",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            snapshot.app_name,
+            snapshot.window_title,
+            category,
+            details,
+            signature,
+            source
+        ],
+    );
+}
+
+fn latest_open_work_session_id(db: &rusqlite::Connection) -> Option<String> {
+    db.query_row(
+        "SELECT id
+         FROM work_sessions
+         WHERE end_time > datetime('now', '-10 minutes')
+         ORDER BY end_time DESC
+         LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn file_module_name(path: &str) -> String {
+    let normalized = path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() >= 2 {
+        parts[parts.len() - 2].to_string()
+    } else if let Some(last) = parts.last() {
+        (*last).to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn update_file_context(db: &rusqlite::Connection, file_path: &str, change_type: &str) {
+    let project_goal: String = db
+        .query_row(
+            "SELECT current_goal
+             FROM project_memory
+             WHERE project_key = 'auto-heart'
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let operation_hint: String = db
+        .query_row(
+            "SELECT intention_desc
+             FROM operation_log
+             WHERE file_path = ?1 AND intention_desc != ''
+             ORDER BY timestamp DESC
+             LIMIT 1",
+            rusqlite::params![file_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let latest_task_hint = if !operation_hint.trim().is_empty() {
+        operation_hint.trim().to_string()
+    } else if !project_goal.trim().is_empty() {
+        project_goal.trim().to_string()
+    } else {
+        String::new()
+    };
+    let related_session_id = latest_open_work_session_id(db);
+    let latest_summary = if latest_task_hint.is_empty() {
+        format!("最近发生 {} 变更", change_type)
+    } else {
+        format!("围绕“{}”发生 {} 变更", latest_task_hint, change_type)
+    };
+
+    let _ = db.execute(
+        "INSERT INTO file_contexts
+         (file_path, module_name, latest_summary, latest_task_hint, last_change_type, related_session_id, confidence, last_changed_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.6, datetime('now'), datetime('now'))
+         ON CONFLICT(file_path) DO UPDATE SET
+            module_name = excluded.module_name,
+            latest_summary = excluded.latest_summary,
+            latest_task_hint = excluded.latest_task_hint,
+            last_change_type = excluded.last_change_type,
+            related_session_id = excluded.related_session_id,
+            confidence = excluded.confidence,
+            last_changed_at = datetime('now'),
+            updated_at = datetime('now')",
+        rusqlite::params![
+            file_path,
+            file_module_name(file_path),
+            latest_summary,
+            latest_task_hint,
+            change_type,
+            related_session_id
+        ],
+    );
+}
+
+fn log_activity_snapshot(db: &DbPool, snapshot: &ActiveWindowSnapshot, source: &str) {
     if let Ok(db) = db.lock() {
         let category = classify_activity(&snapshot.app_name, &snapshot.window_title);
         let duplicated: bool = db
@@ -266,8 +871,9 @@ fn log_activity_snapshot(db: &DbPool, snapshot: &ActiveWindowSnapshot) {
                  WHERE app_name = ?1
                    AND window_title = ?2
                    AND category = ?3
-                   AND timestamp > datetime('now', '-45 seconds')",
-                rusqlite::params![snapshot.app_name, snapshot.window_title, category],
+                   AND source = ?4
+                   AND timestamp > datetime('now', '-10 seconds')",
+                rusqlite::params![snapshot.app_name, snapshot.window_title, category, source],
                 |row| row.get::<_, i32>(0),
             )
             .map(|count| count > 0)
@@ -276,25 +882,25 @@ fn log_activity_snapshot(db: &DbPool, snapshot: &ActiveWindowSnapshot) {
         if duplicated {
             return;
         }
+    }
 
-        let details = if snapshot.window_title.is_empty() {
-            snapshot.app_name.clone()
-        } else {
-            format!("{} | {}", snapshot.app_name, snapshot.window_title)
-        };
+    let category = classify_activity(&snapshot.app_name, &snapshot.window_title);
+    let details = build_activity_details(db, snapshot, category);
 
+    if let Ok(db) = db.lock() {
         let _ = db.execute(
             "INSERT INTO activity_snapshots (app_name, window_title, category, source, details)
-             VALUES (?1, ?2, ?3, 'foreground', ?4)",
-            rusqlite::params![snapshot.app_name, snapshot.window_title, category, details],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![snapshot.app_name, snapshot.window_title, category, source, details],
         );
+        upsert_work_session(&db, snapshot, category, source, &details);
 
         let _ = db.execute(
             "INSERT INTO decision_log (id, description, reason, related_file, context) \
              VALUES (?1, 'active_app_log', ?2, '', datetime('now'))",
             rusqlite::params![
                 Uuid::new_v4().to_string(),
-                format!("active:{} [{}]", snapshot.app_name, category)
+                format!("active:{} [{}] {}", snapshot.app_name, category, details)
             ],
         );
     }
@@ -982,6 +1588,40 @@ fn parse_pending_intent_docs(db: &DbPool, app: &AppHandle, settings: &crate::set
     }
 }
 
+pub fn parse_pending_intents_now(
+    db: &DbPool,
+    app: &AppHandle,
+    settings: &crate::settings::AppSettings,
+) -> bool {
+    let before_count = {
+        let Ok(db) = db.lock() else {
+            return false;
+        };
+        db.query_row(
+            "SELECT COUNT(*) FROM intent_history WHERE parsed_tasks != '[]' AND date(created_at) = date('now')",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .unwrap_or(0)
+    };
+
+    parse_pending_intent_docs(db, app, settings);
+
+    let after_count = {
+        let Ok(db) = db.lock() else {
+            return false;
+        };
+        db.query_row(
+            "SELECT COUNT(*) FROM intent_history WHERE parsed_tasks != '[]' AND date(created_at) = date('now')",
+            [],
+            |row| row.get::<_, i32>(0),
+        )
+        .unwrap_or(0)
+    };
+
+    after_count > before_count
+}
+
 /// 获取语义地图模块摘要（用于意图文档解析时的代码关联）
 fn get_modules_context(db: &DbPool) -> String {
     let db = match db.lock() {
@@ -1338,7 +1978,12 @@ pub fn start_operation_log_heartbeat(
 // ──────────────────────────────────────────────
 
 /// 使用 notify crate 监听项目目录，将变更写入 file_changes 表
-pub fn start_file_watcher(db: DbPool, watch_paths: Vec<PathBuf>) {
+pub fn start_file_watcher(
+    db: DbPool,
+    watch_paths: Vec<PathBuf>,
+    watcher_generation: FileWatcherGeneration,
+) {
+    let current_generation = watcher_generation.fetch_add(1, Ordering::SeqCst) + 1;
     thread::spawn(move || {
         let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
 
@@ -1365,7 +2010,18 @@ pub fn start_file_watcher(db: DbPool, watch_paths: Vec<PathBuf>) {
 
         eprintln!("[file_watcher] 监听 {} 个目录", watch_paths.len());
 
-        for event_result in rx {
+        loop {
+            if watcher_generation.load(Ordering::SeqCst) != current_generation {
+                eprintln!("[file_watcher] 停止旧监听器 generation={}", current_generation);
+                break;
+            }
+
+            let event_result = match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
             match event_result {
                 Ok(event) => {
                     let change_type = match event.kind {
@@ -1391,6 +2047,7 @@ pub fn start_file_watcher(db: DbPool, watch_paths: Vec<PathBuf>) {
                                 "INSERT INTO file_changes (file_path, change_type) VALUES (?1, ?2)",
                                 rusqlite::params![path_str.as_ref(), change_type],
                             );
+                            update_file_context(&db, path_str.as_ref(), change_type);
                         }
                     }
                 }

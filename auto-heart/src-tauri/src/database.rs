@@ -123,6 +123,54 @@ fn create_tables(conn: &Connection) -> Result<()> {
             timestamp     TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS work_sessions (
+            id            TEXT PRIMARY KEY,
+            app_name      TEXT NOT NULL,
+            window_title  TEXT NOT NULL DEFAULT '',
+            category      TEXT NOT NULL DEFAULT 'other',
+            summary       TEXT NOT NULL DEFAULT '',
+            signature     TEXT NOT NULL,
+            source        TEXT NOT NULL DEFAULT 'foreground_change',
+            start_time    TEXT NOT NULL DEFAULT (datetime('now')),
+            end_time      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_memory (
+            conversation_id TEXT PRIMARY KEY,
+            summary         TEXT NOT NULL DEFAULT '',
+            current_goal    TEXT NOT NULL DEFAULT '',
+            decisions       TEXT NOT NULL DEFAULT '[]',
+            open_questions  TEXT NOT NULL DEFAULT '[]',
+            next_steps      TEXT NOT NULL DEFAULT '[]',
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS project_memory (
+            project_key         TEXT PRIMARY KEY,
+            product_goal        TEXT NOT NULL DEFAULT '',
+            current_focus       TEXT NOT NULL DEFAULT '',
+            confirmed_decisions TEXT NOT NULL DEFAULT '[]',
+            constraints         TEXT NOT NULL DEFAULT '[]',
+            user_preferences    TEXT NOT NULL DEFAULT '[]',
+            known_pain_points   TEXT NOT NULL DEFAULT '[]',
+            milestones          TEXT NOT NULL DEFAULT '[]',
+            updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS file_contexts (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path        TEXT NOT NULL UNIQUE,
+            module_name      TEXT NOT NULL DEFAULT '',
+            latest_summary   TEXT NOT NULL DEFAULT '',
+            latest_task_hint TEXT NOT NULL DEFAULT '',
+            last_change_type TEXT NOT NULL DEFAULT '',
+            related_session_id TEXT,
+            confidence       REAL NOT NULL DEFAULT 0.5,
+            last_changed_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_file_changes_time ON file_changes(timestamp);
         CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status, priority);
         CREATE INDEX IF NOT EXISTS idx_intent_history_date ON intent_history(created_at);
@@ -130,6 +178,11 @@ fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_operation_log_chunk ON operation_log(chunk_id);
         CREATE INDEX IF NOT EXISTS idx_activity_snapshots_time ON activity_snapshots(timestamp);
         CREATE INDEX IF NOT EXISTS idx_activity_snapshots_category ON activity_snapshots(category, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_work_sessions_time ON work_sessions(start_time, end_time);
+        CREATE INDEX IF NOT EXISTS idx_work_sessions_signature ON work_sessions(signature, end_time);
+        CREATE INDEX IF NOT EXISTS idx_conversation_memory_updated ON conversation_memory(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_project_memory_updated ON project_memory(updated_at);
+        CREATE INDEX IF NOT EXISTS idx_file_contexts_changed ON file_contexts(last_changed_at);
         ",
     )?;
 

@@ -8,8 +8,8 @@ mod settings;
 
 use database::init_database;
 use heartbeat::{
-    start_deep_heartbeat, start_file_watcher, start_middle_heartbeat, start_operation_log_heartbeat,
-    start_shallow_heartbeat,
+    new_file_watcher_generation, start_deep_heartbeat, start_file_watcher,
+    start_middle_heartbeat, start_operation_log_heartbeat, start_shallow_heartbeat,
 };
 use settings::{load_settings, SettingsHandle, auto_detect_watch_paths};
 
@@ -168,6 +168,8 @@ pub fn run() {
             };
             let settings_handle: SettingsHandle = Arc::new(Mutex::new(app_settings.clone()));
             app.manage(settings_handle.clone());
+            let file_watcher_generation = new_file_watcher_generation();
+            app.manage(file_watcher_generation.clone());
 
             // ── 启动三层心跳 ──
             start_shallow_heartbeat(app.handle().clone(), db.clone(), settings_handle.clone());
@@ -178,7 +180,7 @@ pub fn run() {
             // ── 文件监听（有配置时启动）──
             let all_paths = watch_paths;
             if !all_paths.is_empty() {
-                start_file_watcher(db.clone(), all_paths);
+                start_file_watcher(db.clone(), all_paths, file_watcher_generation);
             }
 
             // ── Orb 窗口初始定位：屏幕右下角 ──
@@ -220,6 +222,12 @@ pub fn run() {
             commands::clear_today_activity_snapshots,
             commands::get_tracking_health,
             commands::add_intent,
+            commands::add_today_task,
+            commands::update_today_task_status,
+            commands::update_today_task,
+            commands::delete_today_task,
+            commands::move_today_task,
+            commands::parse_today_intent_now,
             // 设置
             commands::load_settings_cmd,
             commands::save_settings,

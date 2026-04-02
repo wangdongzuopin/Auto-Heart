@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
+const LAST_CONVERSATION_KEY = 'auto-heart:last-conversation-id';
+
 interface ChatMessage {
   id?: string;
   role: 'user' | 'assistant';
@@ -45,7 +47,13 @@ function getMessageKey(message: ChatMessage, index: number) {
 
 export default function ConversationTab() {
   const [conversations, setConversations] = useState<ConversationInfo[]>([]);
-  const [currentConvId, setCurrentConvId] = useState<string | null>(null);
+  const [currentConvId, setCurrentConvId] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(LAST_CONVERSATION_KEY);
+    } catch {
+      return null;
+    }
+  });
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -75,8 +83,14 @@ export default function ConversationTab() {
 
   useEffect(() => {
     if (currentConvId) {
+      try {
+        localStorage.setItem(LAST_CONVERSATION_KEY, currentConvId);
+      } catch {}
       loadConversation(currentConvId);
     } else {
+      try {
+        localStorage.removeItem(LAST_CONVERSATION_KEY);
+      } catch {}
       setMessages([]);
     }
   }, [currentConvId]);
@@ -85,6 +99,23 @@ export default function ConversationTab() {
     try {
       const list = await invoke<ConversationInfo[]>('get_conversations');
       setConversations(list);
+      const rememberedId = (() => {
+        try {
+          return localStorage.getItem(LAST_CONVERSATION_KEY);
+        } catch {
+          return null;
+        }
+      })();
+
+      if (!currentConvId && list.length > 0) {
+        const nextConversation =
+          (rememberedId && list.find((item) => item.id === rememberedId)) || list[0];
+        if (nextConversation) {
+          setCurrentConvId(nextConversation.id);
+        }
+      } else if (currentConvId && !list.some((item) => item.id === currentConvId)) {
+        setCurrentConvId(list[0]?.id ?? null);
+      }
     } catch (error) {
       console.error('[ConversationTab] load conversations:', error);
     }

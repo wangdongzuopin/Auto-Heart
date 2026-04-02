@@ -1,11 +1,14 @@
 use crate::database::DbPool;
+use crate::heartbeat::{start_file_watcher, stop_file_watcher, FileWatcherGeneration};
 use crate::settings::{AppSettings, SettingsHandle, WindowState};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
@@ -54,6 +57,51 @@ pub struct TodayTask {
     pub task: String,
     pub tag: String,
     pub status: String, // "pending" | "active" | "done"
+}
+
+fn load_latest_today_task_row(
+    db: &rusqlite::Connection,
+) -> Option<(String, String, String)> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    db.query_row(
+        "SELECT id, raw_text, parsed_tasks
+         FROM intent_history
+         WHERE date(created_at) = ?1
+         ORDER BY created_at DESC
+         LIMIT 1",
+        rusqlite::params![today],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )
+    .ok()
+}
+
+fn update_latest_today_tasks(
+    db: &rusqlite::Connection,
+    tasks: &[TodayTask],
+) -> Result<(), String> {
+    let Some((row_id, _, _)) = load_latest_today_task_row(db) else {
+        return Err("today tasks not found".to_string());
+    };
+
+    db.execute(
+        "UPDATE intent_history
+         SET parsed_tasks = ?1,
+             completion_status = 'active'
+         WHERE id = ?2",
+        rusqlite::params![
+            serde_json::to_string(tasks).map_err(|error| error.to_string())?,
+            row_id
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
 }
 
 #[derive(Serialize, Clone)]
@@ -258,7 +306,7 @@ pub fn get_today_tasks(db: State<'_, DbPool>) -> Vec<TodayTask> {
         Ok(d) => d,
         Err(_) => return vec![],
     };
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut stmt = match db.prepare(
         "SELECT parsed_tasks FROM intent_history WHERE date(created_at) = ?1 ORDER BY created_at DESC LIMIT 1",
     ) {
@@ -328,6 +376,18 @@ fn default_tracking_health(watch_paths: Vec<String>) -> TrackingHealth {
         latest_file_change_at: None,
         latest_git_commit: None,
     }
+}
+
+#[derive(Clone)]
+struct TrackingHealthCacheEntry {
+    key: String,
+    value: TrackingHealth,
+    cached_at: Instant,
+}
+
+fn tracking_health_cache() -> &'static Mutex<Option<TrackingHealthCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<TrackingHealthCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn is_ignored_dir(name: &str) -> bool {
@@ -423,25 +483,24 @@ fn collect_today_git_commits(repo_paths: &[String]) -> Vec<GitCommitEntry> {
 
 fn build_today_activity_summary(db: &rusqlite::Connection) -> TodayActivitySummary {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-
-    let categories = db
+    let work_sessions = db
         .prepare(
-            "SELECT category, COUNT(*) AS cnt
-             FROM activity_snapshots
-             WHERE date(timestamp) = ?1
-             GROUP BY category
-             ORDER BY cnt DESC, category ASC
-             LIMIT 6",
+            "SELECT app_name, window_title, category, summary, start_time, end_time
+             FROM work_sessions
+             WHERE date(start_time) = ?1
+             ORDER BY start_time ASC",
         )
         .ok()
         .and_then(|mut stmt| {
             stmt.query_map(rusqlite::params![today.clone()], |row| {
-                let count: i32 = row.get(1)?;
-                Ok(ActivityCategoryStat {
-                    category: row.get(0)?,
-                    count,
-                    minutes: count * 30,
-                })
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
             })
             .ok()
             .map(|rows| rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
@@ -475,76 +534,77 @@ fn build_today_activity_summary(db: &rusqlite::Connection) -> TodayActivitySumma
     let mut total_idle_minutes = 0_i64;
     let mut context_switches = 0_i32;
     let mut sessions: Vec<ActivitySessionStat> = vec![];
+    let mut category_minutes: BTreeMap<String, i64> = BTreeMap::new();
+    let mut category_counts: BTreeMap<String, i32> = BTreeMap::new();
 
-    if !timeline.is_empty() {
-        let mut session_start = 0usize;
+    if !work_sessions.is_empty() {
+        let mut previous_end: Option<NaiveDateTime> = None;
+        let mut previous_category: Option<String> = None;
+        let mut previous_app: Option<String> = None;
 
-        for index in 1..timeline.len() {
-            let previous = &timeline[index - 1];
-            let current = &timeline[index];
-            if let (Some(prev_ts), Some(curr_ts)) = (
-                parse_db_timestamp(&previous.timestamp),
-                parse_db_timestamp(&current.timestamp),
-            ) {
-                let gap_minutes = (curr_ts - prev_ts).num_minutes().max(0);
+        for (app_name, window_title, category, summary, start_time, end_time) in &work_sessions {
+            let (Some(start_ts), Some(end_ts)) =
+                (parse_db_timestamp(start_time), parse_db_timestamp(end_time))
+            else {
+                continue;
+            };
+
+            if let Some(previous_end_ts) = previous_end {
+                let gap_minutes = (start_ts - previous_end_ts).num_minutes().max(0);
                 if gap_minutes >= 5 {
                     total_idle_minutes += gap_minutes;
-                } else {
-                    total_active_minutes += gap_minutes.max(1);
-                }
-
-                if previous.app_name != current.app_name || previous.category != current.category {
-                    context_switches += 1;
-                }
-
-                let should_close_session =
-                    gap_minutes >= 5 || previous.app_name != current.app_name || previous.category != current.category;
-
-                if should_close_session {
-                    let start = &timeline[session_start];
-                    let end = previous;
-                    if let (Some(start_ts), Some(end_ts)) = (
-                        parse_db_timestamp(&start.timestamp),
-                        parse_db_timestamp(&end.timestamp),
-                    ) {
-                        let label = if start.window_title.is_empty() {
-                            start.app_name.clone()
-                        } else {
-                            format!("{} · {}", start.app_name, start.window_title)
-                        };
-                        sessions.push(ActivitySessionStat {
-                            label,
-                            category: start.category.clone(),
-                            start_time: start.timestamp[11..16].to_string(),
-                            end_time: end.timestamp[11..16].to_string(),
-                            minutes: (end_ts - start_ts).num_minutes().max(1),
-                        });
-                    }
-                    session_start = index;
                 }
             }
-        }
 
-        let start = &timeline[session_start];
-        let end = timeline.last().unwrap_or(start);
-        if let (Some(start_ts), Some(end_ts)) = (
-            parse_db_timestamp(&start.timestamp),
-            parse_db_timestamp(&end.timestamp),
-        ) {
-            let label = if start.window_title.is_empty() {
-                start.app_name.clone()
+            if let (Some(previous_category_value), Some(previous_app_value)) =
+                (previous_category.as_ref(), previous_app.as_ref())
+            {
+                if previous_category_value != category || previous_app_value != app_name {
+                    context_switches += 1;
+                }
+            }
+
+            let minutes = (end_ts - start_ts).num_minutes().max(1);
+            total_active_minutes += minutes;
+            *category_minutes.entry(category.clone()).or_insert(0) += minutes;
+            *category_counts.entry(category.clone()).or_insert(0) += 1;
+
+            let label = if !summary.trim().is_empty() {
+                summary.clone()
+            } else if window_title.is_empty() {
+                app_name.clone()
             } else {
-                format!("{} · {}", start.app_name, start.window_title)
+                format!("{} · {}", app_name, window_title)
             };
+
             sessions.push(ActivitySessionStat {
                 label,
-                category: start.category.clone(),
-                start_time: start.timestamp[11..16].to_string(),
-                end_time: end.timestamp[11..16].to_string(),
-                minutes: (end_ts - start_ts).num_minutes().max(1),
+                category: category.clone(),
+                start_time: start_time[11..16].to_string(),
+                end_time: end_time[11..16].to_string(),
+                minutes,
             });
+
+            previous_end = Some(end_ts);
+            previous_category = Some(category.clone());
+            previous_app = Some(app_name.clone());
         }
     }
+
+    let mut categories = category_minutes
+        .into_iter()
+        .map(|(category, minutes)| ActivityCategoryStat {
+            count: category_counts.get(&category).copied().unwrap_or(0),
+            category,
+            minutes: minutes as i32,
+        })
+        .collect::<Vec<_>>();
+    categories.sort_by(|left, right| {
+        right
+            .minutes
+            .cmp(&left.minutes)
+            .then_with(|| left.category.cmp(&right.category))
+    });
 
     sessions.sort_by(|left, right| right.minutes.cmp(&left.minutes));
     let snapshots = timeline.iter().rev().take(12).cloned().collect::<Vec<_>>();
@@ -553,7 +613,7 @@ fn build_today_activity_summary(db: &rusqlite::Connection) -> TodayActivitySumma
         total_active_minutes,
         total_idle_minutes,
         context_switches,
-        categories,
+        categories: categories.into_iter().take(6).collect(),
         sessions: sessions.into_iter().take(6).collect(),
         snapshots,
     }
@@ -603,6 +663,19 @@ pub fn get_tracking_health(
     } else {
         PathBuf::from(&settings_snapshot.data_dir)
     };
+    let cache_key = format!(
+        "{}|{}|{}",
+        today,
+        base_dir.to_string_lossy(),
+        watch_paths.join(";")
+    );
+    if let Ok(cache) = tracking_health_cache().lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.key == cache_key && entry.cached_at.elapsed() < Duration::from_secs(5) {
+                return entry.value.clone();
+            }
+        }
+    }
     health.current_db_path = base_dir
         .join(&today)
         .join("auto_heart.db")
@@ -654,6 +727,14 @@ pub fn get_tracking_health(
             |row| row.get(0),
         )
         .ok();
+
+    if let Ok(mut cache) = tracking_health_cache().lock() {
+        *cache = Some(TrackingHealthCacheEntry {
+            key: cache_key,
+            value: health.clone(),
+            cached_at: Instant::now(),
+        });
+    }
 
     health
 }
@@ -986,13 +1067,15 @@ fn build_local_activity_chat_reply(db: &DbPool) -> String {
         lines.push(String::new());
         lines.push("最近前台活动：".to_string());
         for snapshot in summary.snapshots.iter().take(5) {
-            let title = if snapshot.window_title.is_empty() {
+            let activity = if !snapshot.details.trim().is_empty() {
+                snapshot.details.clone()
+            } else if snapshot.window_title.is_empty() {
                 snapshot.app_name.clone()
             } else {
                 format!("{} / {}", snapshot.app_name, snapshot.window_title)
             };
             let time = snapshot.timestamp.get(11..16).unwrap_or(&snapshot.timestamp);
-            lines.push(format!("- {} {} [{}]", time, title, snapshot.category));
+            lines.push(format!("- {} {} [{}]", time, activity, snapshot.category));
         }
     }
 
@@ -1054,13 +1137,34 @@ pub fn save_settings(
     app: AppHandle,
     new_settings: AppSettings,
     settings: State<'_, SettingsHandle>,
+    db: State<'_, DbPool>,
+    watcher_generation: State<'_, FileWatcherGeneration>,
 ) -> Result<(), String> {
     let app_data_dir: PathBuf = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     crate::settings::save_settings_to_disk(&app_data_dir, &new_settings)?;
+    crate::settings::save_settings_to_home_dir(&new_settings)?;
 
     let mut s = settings.lock().unwrap();
     *s = new_settings;
+
+    let effective_watch_paths: Vec<PathBuf> = if s.watch_paths.is_empty() {
+        crate::settings::auto_detect_watch_paths()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect()
+    } else {
+        s.watch_paths.iter().map(PathBuf::from).collect()
+    };
+
+    stop_file_watcher(watcher_generation.inner());
+    if !effective_watch_paths.is_empty() {
+        start_file_watcher(
+            db.inner().clone(),
+            effective_watch_paths,
+            watcher_generation.inner().clone(),
+        );
+    }
     Ok(())
 }
 
@@ -1402,6 +1506,255 @@ pub struct ChatMessage {
     pub timestamp: String,
 }
 
+fn trim_text(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let shortened = trimmed.chars().take(max_chars).collect::<String>();
+    format!("{}...", shortened)
+}
+
+fn json_array_string(values: Vec<String>) -> String {
+    serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn update_conversation_memory(db: &DbPool, conversation: &crate::conversation::Conversation) {
+    let last_user = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .map(|message| trim_text(&message.content, 120))
+        .unwrap_or_default();
+    let last_assistant = conversation
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+        .map(|message| trim_text(&message.content, 180))
+        .unwrap_or_default();
+    let summary = if last_assistant.is_empty() {
+        format!("最近围绕“{}”继续讨论。", last_user)
+    } else {
+        format!("最近围绕“{}”进行了讨论，最新回答聚焦于：{}", last_user, last_assistant)
+    };
+    let open_questions = if last_user.is_empty() {
+        vec![]
+    } else {
+        vec![last_user.clone()]
+    };
+    let next_steps = if last_assistant.is_empty() {
+        vec![]
+    } else {
+        vec![last_assistant.clone()]
+    };
+
+    if let Ok(db) = db.lock() {
+        let _ = db.execute(
+            "INSERT INTO conversation_memory
+             (conversation_id, summary, current_goal, decisions, open_questions, next_steps, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))
+             ON CONFLICT(conversation_id) DO UPDATE SET
+                summary = excluded.summary,
+                current_goal = excluded.current_goal,
+                decisions = excluded.decisions,
+                open_questions = excluded.open_questions,
+                next_steps = excluded.next_steps,
+                updated_at = datetime('now')",
+            rusqlite::params![
+                conversation.id,
+                summary,
+                last_user,
+                "[]",
+                json_array_string(open_questions),
+                json_array_string(next_steps)
+            ],
+        );
+    }
+}
+
+fn update_project_memory(db: &DbPool) {
+    let Ok(db) = db.lock() else {
+        return;
+    };
+
+    let product_goal = "打造一个能感知工作上下文、形成工作片段、并在重启后延续项目记忆的桌面助手。".to_string();
+    let current_focus = db
+        .query_row(
+            "SELECT current_goal
+             FROM conversation_memory
+             WHERE current_goal != ''
+             ORDER BY updated_at DESC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "继续完善 Auto-Heart 的上下文追踪与记忆能力。".to_string());
+
+    let recent_summaries = db
+        .prepare(
+            "SELECT summary
+             FROM work_sessions
+             WHERE date(start_time) = date('now')
+             ORDER BY updated_at DESC
+             LIMIT 3",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+    let pain_points = vec!["心跳信息需要更贴近用户真实工作片段".to_string()];
+    let decisions = vec![
+        "浏览器与编辑器场景优先追求任务级/意图级总结，不追求点击级监控".to_string(),
+        "对话上下文需要跨重启自动恢复".to_string(),
+        "工作片段、文件上下文和长期记忆都要持久化到本地数据库".to_string(),
+    ];
+    let constraints = vec![
+        "尽量基于桌面侧与本地数据完成感知，避免一开始就引入过重插件依赖".to_string(),
+    ];
+
+    let _ = db.execute(
+        "INSERT INTO project_memory
+         (project_key, product_goal, current_focus, confirmed_decisions, constraints, user_preferences, known_pain_points, milestones, updated_at)
+         VALUES ('auto-heart', ?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
+         ON CONFLICT(project_key) DO UPDATE SET
+            product_goal = excluded.product_goal,
+            current_focus = excluded.current_focus,
+            confirmed_decisions = excluded.confirmed_decisions,
+            constraints = excluded.constraints,
+            user_preferences = excluded.user_preferences,
+            known_pain_points = excluded.known_pain_points,
+            milestones = excluded.milestones,
+            updated_at = datetime('now')",
+        rusqlite::params![
+            product_goal,
+            current_focus,
+            json_array_string(decisions),
+            json_array_string(constraints),
+            json_array_string(vec![
+                "希望心跳跟随用户操作，而不是简单定时采样".to_string(),
+                "希望系统能像 Codex 一样在下次进入时延续上下文".to_string(),
+            ]),
+            json_array_string(pain_points),
+            json_array_string(recent_summaries),
+        ],
+    );
+}
+
+fn build_memory_context(db: &DbPool, session_id: &str) -> String {
+    let Ok(db) = db.lock() else {
+        return String::new();
+    };
+
+    let project_memory = db
+        .query_row(
+            "SELECT product_goal, current_focus, confirmed_decisions, constraints, user_preferences, known_pain_points
+             FROM project_memory
+             WHERE project_key = 'auto-heart'
+             LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .ok();
+
+    let conversation_memory = db
+        .query_row(
+            "SELECT summary, current_goal, open_questions, next_steps
+             FROM conversation_memory
+             WHERE conversation_id = ?1
+             LIMIT 1",
+            rusqlite::params![session_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .ok();
+
+    let recent_sessions = db
+        .prepare(
+            "SELECT summary, start_time, end_time
+             FROM work_sessions
+             WHERE end_time > datetime('now', '-12 hours')
+             ORDER BY end_time DESC
+             LIMIT 3",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                Ok(format!(
+                    "{} ({} - {})",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let recent_files = db
+        .prepare(
+            "SELECT file_path, latest_summary
+             FROM file_contexts
+             ORDER BY last_changed_at DESC
+             LIMIT 5",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| {
+                Ok(format!(
+                    "{} => {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .ok()
+            .map(|rows| rows.filter_map(|row| row.ok()).collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
+
+    let mut sections = Vec::new();
+    if let Some((goal, focus, decisions, constraints, preferences, pain_points)) = project_memory {
+        sections.push(format!(
+            "项目长期记忆\n- 产品目标：{}\n- 当前重点：{}\n- 已确认决策：{}\n- 约束：{}\n- 用户偏好：{}\n- 当前痛点：{}",
+            goal, focus, decisions, constraints, preferences, pain_points
+        ));
+    }
+    if let Some((summary, current_goal, open_questions, next_steps)) = conversation_memory {
+        sections.push(format!(
+            "当前会话记忆\n- 摘要：{}\n- 当前目标：{}\n- 未决问题：{}\n- 下一步：{}",
+            summary, current_goal, open_questions, next_steps
+        ));
+    }
+    if !recent_sessions.is_empty() {
+        sections.push(format!("最近工作片段\n- {}", recent_sessions.join("\n- ")));
+    }
+    if !recent_files.is_empty() {
+        sections.push(format!("最近文件上下文\n- {}", recent_files.join("\n- ")));
+    }
+
+    sections.join("\n\n")
+}
+
 #[tauri::command]
 pub fn get_conversations(app: AppHandle) -> Vec<ConversationInfo> {
     let data_dir = app.path().app_data_dir().unwrap_or_default();
@@ -1441,9 +1794,164 @@ pub fn create_conversation(first_message: String, app: AppHandle) -> Result<Conv
 }
 
 #[tauri::command]
-pub fn delete_conversation(id: String, app: AppHandle) -> Result<(), String> {
+pub fn delete_conversation(id: String, app: AppHandle, db: State<'_, DbPool>) -> Result<(), String> {
     let data_dir = app.path().app_data_dir().unwrap_or_default();
-    crate::conversation::delete_conversation(&data_dir, &id)
+    crate::conversation::delete_conversation(&data_dir, &id)?;
+    if let Ok(db) = db.lock() {
+        let _ = db.execute(
+            "DELETE FROM conversation_memory WHERE conversation_id = ?1",
+            rusqlite::params![id],
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn add_today_task(
+    task: String,
+    time: Option<String>,
+    tag: Option<String>,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let mut tasks = if let Some((row_id, raw_text, parsed_tasks)) = load_latest_today_task_row(&db) {
+        let mut tasks: Vec<TodayTask> = serde_json::from_str(&parsed_tasks).unwrap_or_default();
+        tasks.push(TodayTask {
+            time: time.unwrap_or_default(),
+            task: task.trim().to_string(),
+            tag: tag.unwrap_or_default(),
+            status: "pending".to_string(),
+        });
+        db.execute(
+            "UPDATE intent_history
+             SET parsed_tasks = ?1,
+                 completion_status = 'active',
+                 raw_text = ?2
+             WHERE id = ?3",
+            rusqlite::params![
+                serde_json::to_string(&tasks).map_err(|error| error.to_string())?,
+                if raw_text.trim().is_empty() { "手动录入今日任务" } else { raw_text.trim() },
+                row_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        return Ok(());
+    } else {
+        Vec::new()
+    };
+
+    tasks.push(TodayTask {
+        time: time.unwrap_or_default(),
+        task: task.trim().to_string(),
+        tag: tag.unwrap_or_default(),
+        status: "pending".to_string(),
+    });
+
+    db.execute(
+        "INSERT INTO intent_history (id, raw_text, parsed_tasks, completion_status)
+         VALUES (?1, ?2, ?3, 'active')",
+        rusqlite::params![
+            Uuid::new_v4().to_string(),
+            "手动录入今日任务",
+            serde_json::to_string(&tasks).map_err(|error| error.to_string())?
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_today_task_status(
+    index: usize,
+    status: String,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
+    if !matches!(status.as_str(), "pending" | "active" | "done") {
+        return Err("invalid status".to_string());
+    }
+
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let Some((_, _, parsed_tasks)) = load_latest_today_task_row(&db) else {
+        return Err("today tasks not found".to_string());
+    };
+    let mut tasks: Vec<TodayTask> = serde_json::from_str(&parsed_tasks).unwrap_or_default();
+    let Some(task) = tasks.get_mut(index) else {
+        return Err("task index out of range".to_string());
+    };
+    task.status = status;
+
+    update_latest_today_tasks(&db, &tasks)
+}
+
+#[tauri::command]
+pub fn update_today_task(
+    index: usize,
+    task: String,
+    time: Option<String>,
+    tag: Option<String>,
+    db: State<'_, DbPool>,
+) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let Some((_, _, parsed_tasks)) = load_latest_today_task_row(&db) else {
+        return Err("today tasks not found".to_string());
+    };
+    let mut tasks: Vec<TodayTask> = serde_json::from_str(&parsed_tasks).unwrap_or_default();
+    let Some(current) = tasks.get_mut(index) else {
+        return Err("task index out of range".to_string());
+    };
+
+    current.task = task.trim().to_string();
+    current.time = time.unwrap_or_default();
+    current.tag = tag.unwrap_or_default();
+
+    update_latest_today_tasks(&db, &tasks)
+}
+
+#[tauri::command]
+pub fn delete_today_task(index: usize, db: State<'_, DbPool>) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let Some((_, _, parsed_tasks)) = load_latest_today_task_row(&db) else {
+        return Err("today tasks not found".to_string());
+    };
+    let mut tasks: Vec<TodayTask> = serde_json::from_str(&parsed_tasks).unwrap_or_default();
+    if index >= tasks.len() {
+        return Err("task index out of range".to_string());
+    }
+    tasks.remove(index);
+
+    update_latest_today_tasks(&db, &tasks)
+}
+
+#[tauri::command]
+pub fn move_today_task(index: usize, direction: String, db: State<'_, DbPool>) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let Some((_, _, parsed_tasks)) = load_latest_today_task_row(&db) else {
+        return Err("today tasks not found".to_string());
+    };
+    let mut tasks: Vec<TodayTask> = serde_json::from_str(&parsed_tasks).unwrap_or_default();
+    if index >= tasks.len() {
+        return Err("task index out of range".to_string());
+    }
+
+    let target = match direction.as_str() {
+        "up" if index > 0 => index - 1,
+        "down" if index + 1 < tasks.len() => index + 1,
+        "up" | "down" => return Ok(()),
+        _ => return Err("invalid direction".to_string()),
+    };
+
+    tasks.swap(index, target);
+    update_latest_today_tasks(&db, &tasks)
+}
+
+#[tauri::command]
+pub fn parse_today_intent_now(
+    app: AppHandle,
+    settings: State<'_, SettingsHandle>,
+    db: State<'_, DbPool>,
+) -> Result<bool, String> {
+    let settings_snapshot = settings.lock().map_err(|error| error.to_string())?.clone();
+    Ok(crate::heartbeat::parse_pending_intents_now(&db, &app, &settings_snapshot))
 }
 
 #[tauri::command]
@@ -1483,6 +1991,8 @@ pub async fn send_message(
         conv.messages.push(assistant_msg.clone());
         conv.updated_at = chrono::Local::now().to_rfc3339();
         crate::conversation::save_conversation(&data_dir, &conv)?;
+        update_conversation_memory(&db, &conv);
+        update_project_memory(&db);
 
         return Ok(ChatMessage {
             id: assistant_msg.id,
@@ -1492,14 +2002,21 @@ pub async fn send_message(
         });
     }
 
-    let oai_messages: Vec<crate::model_router::OaiMessage> = conv
-        .messages
-        .iter()
-        .map(|message| crate::model_router::OaiMessage {
-            role: message.role.clone(),
-            content: message.content.clone(),
-        })
-        .collect();
+    let memory_context = build_memory_context(&db, &conv.id);
+    let mut oai_messages: Vec<crate::model_router::OaiMessage> = vec![];
+    if !memory_context.is_empty() {
+        oai_messages.push(crate::model_router::OaiMessage {
+            role: "system".to_string(),
+            content: format!(
+                "你是 Auto-Heart 的长期协作助手。以下是持久化上下文，请把它当作高优先级项目记忆，在回答时保持连续性，但不要机械复述。\n\n{}",
+                memory_context
+            ),
+        });
+    }
+    oai_messages.extend(conv.messages.iter().map(|message| crate::model_router::OaiMessage {
+        role: message.role.clone(),
+        content: message.content.clone(),
+    }));
 
     let chat_model = if settings_snap.chat_model.is_empty() {
         &settings_snap.middle_model
@@ -1531,10 +2048,12 @@ pub async fn send_message(
     conv.messages.push(assistant_msg.clone());
     conv.updated_at = chrono::Local::now().to_rfc3339();
     crate::conversation::save_conversation(&data_dir, &conv)?;
+    update_conversation_memory(&db, &conv);
 
     if contains_intent_keywords(&content) {
         let _ = parse_intent_from_chat(&content, &settings_snap, &db);
     }
+    update_project_memory(&db);
 
     Ok(ChatMessage {
         id: assistant_msg.id,
