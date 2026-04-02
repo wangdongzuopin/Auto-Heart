@@ -88,13 +88,13 @@ fn create_tables(conn: &Connection) -> Result<()> {
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             file_path   TEXT NOT NULL,
             change_type TEXT NOT NULL,  -- create, modify, delete, rename
-            timestamp   TEXT NOT NULL DEFAULT (datetime('now'))
+            timestamp   TEXT NOT NULL DEFAULT (datetime('now', '+8 hours'))
         );
 
         -- 操作日志（LLM 意图分析结果）
         CREATE TABLE IF NOT EXISTS operation_log (
             id              TEXT PRIMARY KEY,
-            timestamp       TEXT NOT NULL DEFAULT (datetime('now')),
+            timestamp       TEXT NOT NULL DEFAULT (datetime('now', '+8 hours')),
             file_path       TEXT NOT NULL,
             change_type     TEXT NOT NULL,
             intention_desc  TEXT NOT NULL DEFAULT '',

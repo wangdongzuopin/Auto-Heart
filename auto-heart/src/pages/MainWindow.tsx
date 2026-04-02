@@ -4,25 +4,23 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { PhysicalPosition } from '@tauri-apps/api/dpi';
 import { isTauriRuntime } from '../tauriRuntime';
 import TodayTab from './TodayTab';
-import SemanticMapTab from './SemanticMapTab';
 import SettingsTab from './SettingsTab';
 import ConversationTab from './ConversationTab';
 import { useResolvedTheme } from '../hooks/useResolvedTheme';
-import { useSettings } from '../hooks/useSettings';
+import { useSettings, SettingsProvider } from '../hooks/useSettings.tsx';
 
-type Tab = 'today' | 'semantic-map' | 'settings' | 'conversation';
+type Tab = 'today' | 'settings' | 'conversation';
 
 const getInitialTab = (): Tab => {
   if (!isTauriRuntime()) return 'today';
   const params = new URLSearchParams(window.location.search);
   const view = params.get('view');
   if (view === 'conversation') return 'conversation';
-  if (view === 'semantic-map') return 'semantic-map';
   if (view === 'settings') return 'settings';
   return 'today';
 };
 
-export default function MainWindow() {
+function MainWindowContent() {
   const [activeTab, setActiveTab] = useState<Tab>(getInitialTab);
   const { resolvedTheme } = useResolvedTheme();
   const { settings, updateSettings } = useSettings();
@@ -54,7 +52,7 @@ export default function MainWindow() {
       const { listen } = await import('@tauri-apps/api/event');
       unlisten = await listen<string>('navigate_to', (event) => {
         const nextTab = event.payload as Tab;
-        if (['today', 'semantic-map', 'conversation', 'settings'].includes(nextTab)) {
+        if (['today', 'conversation', 'settings'].includes(nextTab)) {
           setActiveTab(nextTab);
         }
       });
@@ -110,7 +108,6 @@ export default function MainWindow() {
 
   const tabs: Array<{ id: Tab; label: string }> = [
     { id: 'today', label: '今天' },
-    { id: 'semantic-map', label: '语义地图' },
     { id: 'conversation', label: '对话' },
     { id: 'settings', label: '设置' },
   ];
@@ -137,16 +134,6 @@ export default function MainWindow() {
           <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor', display: 'inline-block' }} />
           活跃
         </span>
-        <button
-          onClick={async () => {
-            await saveWindowState();
-            await invoke('close_main_window');
-          }}
-          style={{ width: 24, height: 24, borderRadius: '50%', border: 'none', background: 'transparent', color: 'var(--color-text-tertiary)', cursor: 'pointer' }}
-          title="关闭"
-        >
-          ×
-        </button>
       </div>
 
       <div style={{ display: 'flex', borderBottom: '0.5px solid var(--color-border-tertiary)' }}>
@@ -171,10 +158,17 @@ export default function MainWindow() {
 
       <div style={{ flex: 1, overflow: 'auto' }}>
         {activeTab === 'today' && <TodayTab />}
-        {activeTab === 'semantic-map' && <SemanticMapTab />}
         {activeTab === 'conversation' && <ConversationTab />}
         {activeTab === 'settings' && <SettingsTab />}
       </div>
     </div>
+  );
+}
+
+export default function MainWindow() {
+  return (
+    <SettingsProvider>
+      <MainWindowContent />
+    </SettingsProvider>
   );
 }

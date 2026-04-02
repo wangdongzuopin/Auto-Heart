@@ -180,7 +180,7 @@ pub fn run() {
             // ── 文件监听（有配置时启动）──
             let all_paths = watch_paths;
             if !all_paths.is_empty() {
-                start_file_watcher(db.clone(), all_paths, file_watcher_generation);
+                start_file_watcher(db.clone(), all_paths, file_watcher_generation, app.handle().clone());
             }
 
             // ── Orb 窗口初始定位：屏幕右下角 ──
@@ -220,6 +220,8 @@ pub fn run() {
             commands::get_today_intent,
             commands::get_today_activity_summary,
             commands::clear_today_activity_snapshots,
+            commands::get_today_file_changes,
+            commands::clear_today_file_changes,
             commands::get_tracking_health,
             commands::add_intent,
             commands::add_today_task,

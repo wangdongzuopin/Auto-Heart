@@ -1,17 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 /** 带 5 秒超时的 invoke，防止 Rust 端阻塞导致 UI 永久挂起 */
 async function invokeWithTimeout<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const timeout = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000)
+    setTimeout(() => reject(new Error(`invoke "${cmd}" timeout after 5s`)), 5000),
   );
   return Promise.race([invoke<T>(cmd, args), timeout]) as Promise<T>;
 }
 
 export interface Settings {
   // 基础
-  dataDir: string;          // 自定义数据目录，空=默认
+  dataDir: string;
   intentDocPath: string;
   watchPaths: string[];
   silenceMode: 'focus' | 'normal' | 'open';
@@ -127,11 +127,29 @@ function toRust(s: Settings): Record<string, unknown> {
   };
 }
 
-export function useSettings() {
+// ──────────────────────────────────────────────
+// 全局 Context（只加载一次）
+// ──────────────────────────────────────────────
+
+interface SettingsContextValue {
+  settings: Settings;
+  loading: boolean;
+  setLocalSettings: (patch: Partial<Settings>) => void;
+  updateSettings: (patch: Partial<Settings>) => Promise<void>;
+  saveToHome: () => Promise<void>;
+}
+
+const SettingsContext = createContext<SettingsContextValue | null>(null);
+
+export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
+  const loadedRef = useRef(false);
 
   useEffect(() => {
+    if (loadedRef.current) return;
+    loadedRef.current = true;
+
     invokeWithTimeout<Record<string, unknown>>('load_settings_cmd')
       .then((raw) => setSettings(fromRust(raw)))
       .catch((e) => console.warn('[useSettings] load timeout:', e))
@@ -157,7 +175,6 @@ export function useSettings() {
     await persistSettings(updated);
   }, [persistSettings, settings]);
 
-  /// 保存到用户主目录 ~/.autoheart
   const saveToHome = useCallback(async () => {
     try {
       await invokeWithTimeout('save_settings_to_home', { newSettings: toRust(settings) });
@@ -167,5 +184,25 @@ export function useSettings() {
     }
   }, [settings]);
 
-  return { settings, setLocalSettings, persistSettings, updateSettings, saveToHome, loading };
+  return (
+    <SettingsContext.Provider value={{ settings, loading, setLocalSettings, updateSettings, saveToHome }}>
+      {children}
+    </SettingsContext.Provider>
+  );
+}
+
+export function useSettings() {
+  const ctx = useContext(SettingsContext);
+  if (ctx) {
+    return ctx;
+  }
+  // Fallback：provider 外部使用时用自己独立的状态（用于 Orb 等独立窗口）
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [loading] = useState(false);
+
+  const setLocalSettings = useCallback((patch: Partial<Settings>) => {
+    setSettings((current) => ({ ...current, ...patch }));
+  }, []);
+
+  return { settings, loading, setLocalSettings, updateSettings: async () => {}, saveToHome: async () => {} };
 }

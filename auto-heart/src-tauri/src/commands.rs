@@ -643,6 +643,67 @@ pub fn clear_today_activity_snapshots(db: State<'_, DbPool>) -> Result<(), Strin
     Ok(())
 }
 
+#[derive(Serialize)]
+pub struct FileChangeEntry {
+    pub path: String,
+    pub change_type: String,
+    pub timestamp: String,
+}
+
+#[derive(Serialize)]
+pub struct TodayFileChanges {
+    pub changes: Vec<FileChangeEntry>,
+    pub total_count: i64,
+}
+
+#[tauri::command]
+pub fn get_today_file_changes(db: State<'_, DbPool>) -> Result<TodayFileChanges, String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let mut stmt = db
+        .prepare(
+            "SELECT file_path, change_type, timestamp FROM file_changes \
+             WHERE date(timestamp) = ?1 \
+             ORDER BY timestamp DESC \
+             LIMIT 100",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let changes: Vec<FileChangeEntry> = stmt
+        .query_map(rusqlite::params![today], |row| {
+            Ok(FileChangeEntry {
+                path: row.get(0)?,
+                change_type: row.get(1)?,
+                timestamp: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let total_count = changes.len() as i64;
+
+    Ok(TodayFileChanges {
+        changes,
+        total_count,
+    })
+}
+
+#[tauri::command]
+pub fn clear_today_file_changes(db: State<'_, DbPool>) -> Result<(), String> {
+    let db = db.lock().map_err(|error| error.to_string())?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    db.execute(
+        "DELETE FROM file_changes WHERE date(timestamp) = ?1",
+        rusqlite::params![today],
+    )
+    .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_tracking_health(
     app: AppHandle,
@@ -1163,6 +1224,7 @@ pub fn save_settings(
             db.inner().clone(),
             effective_watch_paths,
             watcher_generation.inner().clone(),
+            app.clone(),
         );
     }
     Ok(())

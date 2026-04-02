@@ -5,6 +5,7 @@ use chrono::{NaiveDateTime, Timelike};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -1982,6 +1983,7 @@ pub fn start_file_watcher(
     db: DbPool,
     watch_paths: Vec<PathBuf>,
     watcher_generation: FileWatcherGeneration,
+    app: AppHandle,
 ) {
     let current_generation = watcher_generation.fetch_add(1, Ordering::SeqCst) + 1;
     thread::spawn(move || {
@@ -2010,6 +2012,11 @@ pub fn start_file_watcher(
 
         eprintln!("[file_watcher] 监听 {} 个目录", watch_paths.len());
 
+        // 用于去重：记录每个文件路径上次写入的时间
+        let mut last_insert: HashMap<String, Instant> = HashMap::new();
+        // 定期清理过期条目（避免内存泄漏）
+        let mut last_cleanup = Instant::now();
+
         loop {
             if watcher_generation.load(Ordering::SeqCst) != current_generation {
                 eprintln!("[file_watcher] 停止旧监听器 generation={}", current_generation);
@@ -2021,6 +2028,12 @@ pub fn start_file_watcher(
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
+
+            // 定期清理过期的去重记录（每60秒）
+            if last_cleanup.elapsed() >= Duration::from_secs(60) {
+                last_insert.retain(|_, v| v.elapsed() < Duration::from_secs(5));
+                last_cleanup = Instant::now();
+            }
 
             match event_result {
                 Ok(event) => {
@@ -2043,12 +2056,24 @@ pub fn start_file_watcher(
                             {
                                 continue;
                             }
+
+                            // 去重：500ms 内同一文件只记录一次
+                            let now = Instant::now();
+                            if let Some(last_time) = last_insert.get(path_str.as_ref()) {
+                                if now.duration_since(*last_time) < Duration::from_millis(500) {
+                                    continue;
+                                }
+                            }
+                            last_insert.insert(path_str.to_string(), now);
+
                             let _ = db.execute(
-                                "INSERT INTO file_changes (file_path, change_type) VALUES (?1, ?2)",
+                                "INSERT INTO file_changes (file_path, change_type, timestamp) VALUES (?1, ?2, datetime('now', '+8 hours'))",
                                 rusqlite::params![path_str.as_ref(), change_type],
                             );
                             update_file_context(&db, path_str.as_ref(), change_type);
                         }
+                        // 通知前端刷新文件变更列表
+                        let _ = app.emit("file:changed", ());
                     }
                 }
                 Err(e) => {

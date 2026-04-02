@@ -540,11 +540,8 @@ export default function SettingsTab() {
         onProviderChange={(provider) =>
           handleSave({
             middleModel: provider,
-            middleModelName: '',
             deepModel: provider,
-            deepModelName: '',
             chatModel: provider,
-            chatModelName: '',
           })
         }
         onModelNameChange={(name) =>
