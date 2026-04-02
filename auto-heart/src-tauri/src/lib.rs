@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use chrono::Local;
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
@@ -95,7 +96,12 @@ fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
+    // 加载高清图标
+    let icon_bytes = include_bytes!("../icons/256x256.png");
+    let icon = Image::from_bytes(icon_bytes)?;
+
     TrayIconBuilder::new()
+        .icon(icon)
         .menu(&menu)
         .tooltip("Auto-Heart · 活跃中")
         .on_menu_event(|app, event| match event.id.as_ref() {

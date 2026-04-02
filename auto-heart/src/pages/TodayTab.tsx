@@ -28,6 +28,46 @@ interface TodayFileChanges {
   total_count: number;
 }
 
+interface ActivityCategoryStat {
+  category: string;
+  count: number;
+  minutes: number;
+}
+
+interface ActivitySnapshotEntry {
+  app_name: string;
+  window_title: string;
+  category: string;
+  details: string;
+  timestamp: string;
+}
+
+interface ActivitySessionStat {
+  label: string;
+  category: string;
+  start_time: string;
+  end_time: string;
+  minutes: number;
+}
+
+interface TodayActivitySummary {
+  total_active_minutes: number;
+  total_idle_minutes: number;
+  context_switches: number;
+  categories: ActivityCategoryStat[];
+  sessions: ActivitySessionStat[];
+  snapshots: ActivitySnapshotEntry[];
+}
+
+const emptyActivitySummary: TodayActivitySummary = {
+  total_active_minutes: 0,
+  total_idle_minutes: 0,
+  context_switches: 0,
+  categories: [],
+  sessions: [],
+  snapshots: [],
+};
+
 const cardStyle: React.CSSProperties = {
   background: 'var(--color-background-secondary)',
   borderRadius: 'var(--border-radius-lg)',
@@ -38,6 +78,7 @@ const cardStyle: React.CSSProperties = {
 export default function TodayTab() {
   const [report, setReport] = useState<ReportData | null>(null);
   const [fileChanges, setFileChanges] = useState<TodayFileChanges>({ changes: [], total_count: 0 });
+  const [activitySummary, setActivitySummary] = useState<TodayActivitySummary>(emptyActivitySummary);
   const [editingReport, setEditingReport] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [sending, setSending] = useState<string | null>(null);
@@ -65,24 +106,39 @@ export default function TodayTab() {
     }
   }, []);
 
+  const loadActivitySummary = useCallback(async () => {
+    try {
+      setActivitySummary(await invokeWithTimeout<TodayActivitySummary>('get_today_activity_summary'));
+    } catch {
+      setActivitySummary(emptyActivitySummary);
+    }
+  }, []);
+
   useEffect(() => {
     loadReport();
     loadFileChanges();
+    loadActivitySummary();
 
     let unlistenReport: (() => void) | undefined;
     let unlistenFileChange: (() => void) | undefined;
+    let unlistenShallow: (() => void) | undefined;
 
     const setup = async () => {
       unlistenReport = await listen('daily_report:ready', () => loadReport());
       unlistenFileChange = await listen('file:changed', () => loadFileChanges());
+      unlistenShallow = await listen('heartbeat:shallow', () => {
+        loadFileChanges();
+        loadActivitySummary();
+      });
     };
 
     setup();
     return () => {
       unlistenReport?.();
       unlistenFileChange?.();
+      unlistenShallow?.();
     };
-  }, [loadReport, loadFileChanges]);
+  }, [loadReport, loadFileChanges, loadActivitySummary]);
 
   const saveEdit = async () => {
     if (!report) return;
@@ -163,8 +219,8 @@ export default function TodayTab() {
                 fontSize: 10,
                 padding: '2px 7px',
                 borderRadius: 999,
-                background: 'var(--color-brand-light)',
-                color: 'var(--color-brand)',
+                background: 'rgba(229, 94, 81, 0.12)',
+                color: '#e55e51',
               }}
             >
               {fileChanges.total_count} 个变更
@@ -239,6 +295,193 @@ export default function TodayTab() {
                   }}
                 >
                   {item.path}
+                </span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: 'var(--color-text-tertiary)',
+                    flexShrink: 0,
+                  }}
+                >
+                  {item.timestamp.slice(11, 19)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 实时感知 */}
+      <section style={cardStyle}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            marginBottom: 10,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-primary)' }}>
+              实时感知
+            </div>
+            <span
+              style={{
+                fontSize: 10,
+                padding: '2px 7px',
+                borderRadius: 999,
+                background: 'rgba(229, 94, 81, 0.12)',
+                color: '#e55e51',
+              }}
+            >
+              {activitySummary.total_active_minutes} 分钟活跃
+            </span>
+          </div>
+          <span
+            style={{
+              fontSize: 10,
+              color: 'var(--color-text-tertiary)',
+            }}
+          >
+            每30秒自动刷新
+          </span>
+        </div>
+
+        {/* 统计卡片 */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+            gap: 8,
+            marginBottom: 10,
+          }}
+        >
+          <div
+            style={{
+              padding: '8px 10px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>活跃时长</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+              {activitySummary.total_active_minutes} 分钟
+            </div>
+          </div>
+          <div
+            style={{
+              padding: '8px 10px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>空闲时长</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+              {activitySummary.total_idle_minutes} 分钟
+            </div>
+          </div>
+          <div
+            style={{
+              padding: '8px 10px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+            }}
+          >
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>切换次数</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--color-text-primary)' }}>
+              {activitySummary.context_switches} 次
+            </div>
+          </div>
+        </div>
+
+        {/* 分类统计 */}
+        {activitySummary.categories.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+            {activitySummary.categories.map((item) => (
+              <div
+                key={item.category}
+                style={{
+                  padding: '5px 8px',
+                  background: 'var(--color-background-tertiary)',
+                  borderRadius: 'var(--border-radius-md)',
+                  border: '0.5px solid var(--color-border-primary)',
+                }}
+              >
+                <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)' }}>{item.category}</div>
+                <div style={{ fontSize: 11, color: 'var(--color-text-primary)', fontWeight: 600 }}>
+                  {item.minutes} 分钟
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 最近活动快照 */}
+        {activitySummary.snapshots.length === 0 ? (
+          <div
+            style={{
+              fontSize: 11,
+              color: 'var(--color-text-tertiary)',
+              textAlign: 'center',
+              padding: '12px',
+              background: 'var(--color-background-tertiary)',
+              borderRadius: 'var(--border-radius-md)',
+            }}
+          >
+            暂无前台活动记录
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginBottom: 4 }}>
+              最近活动
+            </div>
+            {activitySummary.snapshots.slice(0, 10).map((item, index) => (
+              <div
+                key={`${item.timestamp}-${index}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '6px 8px',
+                  background: 'var(--color-background-tertiary)',
+                  borderRadius: 'var(--border-radius-md)',
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 700,
+                    padding: '2px 5px',
+                    borderRadius: 4,
+                    background: 'rgba(229, 94, 81, 0.12)',
+                    color: '#e55e51',
+                    flexShrink: 0,
+                  }}
+                >
+                  {item.category}
+                </span>
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: 'var(--color-text-primary)',
+                    fontWeight: 600,
+                    flexShrink: 0,
+                  }}
+                >
+                  {item.app_name}
+                </span>
+                <span
+                  style={{
+                    fontSize: 10,
+                    color: 'var(--color-text-secondary)',
+                    flex: 1,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {item.window_title || item.details}
                 </span>
                 <span
                   style={{

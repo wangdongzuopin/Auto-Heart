@@ -114,9 +114,9 @@ function MainWindowContent() {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: 'var(--color-background-primary)', color: 'var(--color-text-primary)', fontFamily: 'var(--font-sans)' }}>
-      <div style={{ padding: '10px 16px', borderBottom: '0.5px solid var(--color-border-tertiary)', display: 'flex', alignItems: 'center', gap: 10, background: 'var(--color-background-secondary)' }}>
-        <div style={{ width: 20, height: 20, borderRadius: '50%', background: 'var(--color-brand-light)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--color-brand)' }} />
+      <div style={{ padding: '10px 16px', borderBottom: '0.5px solid var(--color-border-tertiary)', display: 'flex', alignItems: 'center', gap: 10, background: 'var(--color-background-secondary)', borderLeft: '3px solid #e55e51' }}>
+        <div style={{ width: 20, height: 20, borderRadius: '50%', background: '#e55e51', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#fff' }} />
         </div>
         <span style={{ fontSize: 13, fontWeight: 600 }}>Auto-Heart</span>
         <button
@@ -130,8 +130,8 @@ function MainWindowContent() {
               ? '暗色模式'
               : '明亮模式'}
         </button>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--color-text-success)', display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'currentColor', display: 'inline-block' }} />
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: '#e55e51', display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#e55e51', display: 'inline-block' }} />
           活跃
         </span>
       </div>
@@ -147,8 +147,8 @@ function MainWindowContent() {
               cursor: 'pointer',
               background: 'transparent',
               border: 'none',
-              borderBottom: activeTab === tab.id ? '2px solid var(--color-brand)' : '2px solid transparent',
-              color: activeTab === tab.id ? 'var(--color-brand)' : 'var(--color-text-tertiary)',
+              borderBottom: activeTab === tab.id ? '2px solid #e55e51' : '2px solid transparent',
+              color: activeTab === tab.id ? '#e55e51' : 'var(--color-text-tertiary)',
             }}
           >
             {tab.label}
