@@ -10,6 +10,7 @@ import { useResolvedTheme } from './hooks/useResolvedTheme';
 import './App.css';
 
 const POS_KEY = 'auto-heart:orb-pos-v3';
+const ENABLE_SPEECH_BUBBLE = false;
 
 /** WebView2 透明窗口对 alpha=0 区域常不做命中测试；铺极淡底色保证能收到指针事件 */
 const HIT_BG = 'transparent';
@@ -27,6 +28,9 @@ function App() {
   useResolvedTheme();
   const [orbState, setOrbState] = useState<'idle' | 'thinking' | 'speaking'>('idle');
   const isDraggingRef = useRef(false);
+  const orbStateRef = useRef<'idle' | 'thinking' | 'speaking'>('idle');
+  const thinkingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bubbleMessage, setBubbleMessage] = useState<{
     id: string;
     title: string;
@@ -133,30 +137,55 @@ function App() {
   }, []);
 
   useEffect(() => {
+    orbStateRef.current = orbState;
+  }, [orbState]);
+
+  useEffect(() => {
     let unlistenNew: (() => void) | undefined;
     let unlistenMiddle: (() => void) | undefined;
     let unlistenDeep: (() => void) | undefined;
     let unlistenAgent: (() => void) | undefined;
-    let thinkingTimer: ReturnType<typeof setTimeout> | undefined;
 
     const setup = async () => {
       if (!isTauriRuntime()) return;
 
       unlistenMiddle = await listen('heartbeat:middle', () => {
-        if (orbState !== 'speaking') {
+        if (orbStateRef.current !== 'speaking') {
+          if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
           setOrbState('thinking');
-          thinkingTimer = setTimeout(() => setOrbState('idle'), 3000);
+          thinkingTimerRef.current = setTimeout(() => {
+            setOrbState('idle');
+            thinkingTimerRef.current = null;
+          }, 3000);
         }
       });
 
       unlistenNew = await listen<IncomingMessage>('message_queue:new', (event) => {
-        clearTimeout(thinkingTimer);
+        if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
+        if (!ENABLE_SPEECH_BUBBLE) {
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+          setOrbState('speaking');
+          speakingTimerRef.current = setTimeout(() => {
+            setOrbState('idle');
+            speakingTimerRef.current = null;
+          }, 2500);
+          return;
+        }
         const { id, title, content } = event.payload;
         setOrbState('speaking');
         setBubbleMessage({ id, title, content, type: 'message' });
       });
 
       unlistenDeep = await listen<{ date: string; preview: string }>('daily_report:ready', (event) => {
+        if (!ENABLE_SPEECH_BUBBLE) {
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+          setOrbState('speaking');
+          speakingTimerRef.current = setTimeout(() => {
+            setOrbState('idle');
+            speakingTimerRef.current = null;
+          }, 2500);
+          return;
+        }
         setOrbState('speaking');
         setBubbleMessage({
           id: `report-${event.payload.date}`,
@@ -172,6 +201,15 @@ function App() {
         title: string;
         message: string;
       }>('agent:alert', (event) => {
+        if (!ENABLE_SPEECH_BUBBLE) {
+          if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
+          setOrbState('speaking');
+          speakingTimerRef.current = setTimeout(() => {
+            setOrbState('idle');
+            speakingTimerRef.current = null;
+          }, 2500);
+          return;
+        }
         setBubbleMessage({
           id: `agent-${Date.now()}`,
           title: event.payload.title,
@@ -185,14 +223,14 @@ function App() {
     setup();
 
     return () => {
-      clearTimeout(thinkingTimer);
+      if (thinkingTimerRef.current) clearTimeout(thinkingTimerRef.current);
+      if (speakingTimerRef.current) clearTimeout(speakingTimerRef.current);
       unlistenNew?.();
       unlistenMiddle?.();
       unlistenDeep?.();
       unlistenAgent?.();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orbState]);
+  }, []);
 
   return (
     <div
@@ -210,7 +248,7 @@ function App() {
     >
       <div style={{ position: 'relative' }}>
         <Orb onClick={handleOrbClick} state={orbState} size={120} />
-        {bubbleMessage && (
+        {ENABLE_SPEECH_BUBBLE && bubbleMessage && (
           <SpeechBubble
             message={{ title: bubbleMessage.title, content: bubbleMessage.content }}
             onDismiss={handleBubbleDismiss}
